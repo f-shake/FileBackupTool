@@ -539,9 +539,13 @@ app.UseStaticFiles();
 // ⑤ 路由：后面的端点级特性（[EnableRateLimiting]、[Authorize]）都依赖它先解析出端点。
 app.UseRouting();
 
-// ⑥ 在安全方法上下发 antiforgery 令牌。必须在业务端点之前，
-//    因为**第一个写请求**就可能需要它（前端读完响应才能拿到 Cookie）。
-app.UseMiddleware<AntiforgeryTokenMiddleware>();
+// 注意：这里**没有**"在安全方法上下发 antiforgery 令牌"的中间件，这是有意的。
+// 早先版本在这里挂过一个，它破坏了配对令牌的前提：这个位置在 UseAuthentication **之前**，
+// 于是每个 GET 都会在**用户还是匿名时**签发/复用 cookie token，
+// 而写请求的校验发生在认证之后（身份是 admin）→ 报
+// "The provided antiforgery token was meant for a different claims-based user than the current user"，
+// 症状是"登录之后所有写操作 400、读操作全正常"。
+// 现在令牌**只**由 GET /api/auth/csrf 在认证之后签发，见下方 ⑩。
 
 // ⑦ 认证：必须在限流之前，因为全局限流要按"已认证 / 匿名"分档。
 app.UseAuthentication();
@@ -555,7 +559,18 @@ app.UseMiddleware<TotpRequiredMiddleware>();
 
 app.UseAuthorization();
 
-// ⑩ 端点。
+// ⑩ antiforgery 令牌**只由** GET /api/auth/csrf 签发（见 AuthController.Csrf），
+// 所以这里没有"在安全方法上顺手签发"的中间件。
+//
+// 为什么不能有第二个签发点：ASP.NET Core 的 antiforgery 是**配对令牌**——
+// cookie 一份、请求头一份，而且请求令牌与"签发时的用户身份"绑定。
+// 一旦存在两个签发点（尤其是挂在认证之前的那个），cookie 与请求令牌就可能来自
+// 不同的身份，校验必然失败，报
+// "The provided antiforgery token was meant for a different claims-based user than the current user"，
+// 症状是**登录之后所有写操作 400、读操作全正常**。
+// 保持"唯一签发点 + 它在认证之后"，cookie 就永远与最后一次签发的请求令牌同身份。
+
+// ⑪ 端点。
 app.MapControllers();
 app.MapHub<EventsHub>("/hubs/events");
 

@@ -4,61 +4,17 @@ using Microsoft.AspNetCore.Antiforgery;
 namespace FileBackupTool.Api.Infrastructure;
 
 /// <summary>
-/// 在**安全方法**（GET/HEAD/OPTIONS）上主动下发 antiforgery 令牌。
+/// 写操作上的 antiforgery 强制校验。设计文档 05 §3：**全部写操作启用 antiforgery**。
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>为什么不能只依赖框架自动下发</b>：双提交 Cookie 模式要求浏览器先拿到 Cookie
-/// （<c>XSRF-TOKEN</c>），之后的写请求才能把它回填到 <c>X-XSRF-TOKEN</c> 头上。
-/// 而框架只在"该端点需要校验"时才顺带下发令牌——对本 API 来说需要校验的都是写方法，
-/// 于是**第一个**写请求必然没有可用令牌（鸡生蛋问题），前端会看到 400，
-/// 而用户看到的是"保存不了，刷新一下又好了"这种最难受的间歇性故障。
-/// 所以由宿主显式下发：只要方法安全，就把令牌摆好。
+/// <b>令牌只有一个签发点</b>：<c>GET /api/auth/csrf</c>（<c>AuthController.Csrf</c>），
+/// 它在认证之后执行。**不要**再在任何中间件里"顺手签发"——
+/// ASP.NET Core 的 antiforgery 是配对令牌（cookie 一份、请求头一份），
+/// 且请求令牌与**签发时的用户身份**绑定；出现第二个签发点就会让 cookie 与请求令牌
+/// 来自不同身份，校验必然失败，症状是"登录之后所有写操作 400、读操作全正常"。
+/// 详见 <c>docs/plans/09-实现期修订.md</c>。
 /// </para>
-/// <para>
-/// <b>它不下发任何秘密</b>：令牌本身由 Data Protection 密钥环派生，
-/// 这里的 Cookie 只是"同一浏览器的第二个请求能证明它读过第一个响应"，
-/// 攻击者站点**跨站读不到它**（同源策略 + <c>SameSite=Strict</c>）。
-/// 这正是 CSRF 防护的全部原理，见设计文档 05 §8。
-/// </para>
-/// </remarks>
-public sealed class AntiforgeryTokenMiddleware(
-    RequestDelegate next,
-    IAntiforgery antiforgery,
-    ILogger<AntiforgeryTokenMiddleware> logger)
-{
-    private readonly RequestDelegate _next = next;
-    private readonly IAntiforgery _antiforgery = antiforgery;
-    private readonly ILogger<AntiforgeryTokenMiddleware> _logger = logger;
-
-    public async Task InvokeAsync(HttpContext context)
-    {
-        if (IsSafeMethod(context.Request.Method))
-        {
-            try
-            {
-                // 内部会复用请求里已有的合法 Cookie，只在缺失/非法时新生成一个。
-                _antiforgery.GetAndStoreTokens(context);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // 下发令牌失败绝不能把一次 GET 变成 500：那只影响"接下来能不能写"，
-                // 而写操作自己会重新触发一次下发（用户刷新页面即可）。
-                _logger.LogWarning(ex, "下发 antiforgery 令牌失败：{Path}", context.Request.Path);
-            }
-        }
-
-        await _next(context).ConfigureAwait(false);
-    }
-
-    private static bool IsSafeMethod(string method) =>
-        HttpMethods.IsGet(method) || HttpMethods.IsHead(method) || HttpMethods.IsOptions(method);
-}
-
-/// <summary>
-/// 写操作上的 antiforgery 强制校验。
-/// </summary>
-/// <remarks>
 /// <para>
 /// <b>为什么用 MVC 的 action filter，而不是 <c>[AutoValidateAntiforgeryToken]</c></b>：
 /// 后者的校验器是由 MVC 的 <c>AntiforgeryApplicationModelProvider</c> 注入的，
@@ -95,7 +51,8 @@ public sealed class RequireAntiforgeryAttribute : Attribute, Microsoft.AspNetCor
                 throw ApiException.BadRequest(
                     ApiErrorCodes.AntiforgeryFailed,
                     "请求缺少或携带了无效的防跨站令牌，已被拒绝。请刷新页面后重试。",
-                    "写操作必须带 X-XSRF-TOKEN 请求头（值取自 XSRF-TOKEN Cookie）。");
+                    "写操作的 X-XSRF-TOKEN 头必须取自 GET /api/auth/csrf 返回的 token "
+                    + "（**不是** XSRF-TOKEN cookie 的值——cookie 里是配对的另一半）。");
             }
         }
 

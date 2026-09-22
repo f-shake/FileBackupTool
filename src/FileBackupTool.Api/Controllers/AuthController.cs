@@ -47,6 +47,7 @@ public sealed class AuthController(
     SessionRegistry sessions,
     AuditLogger audit,
     IAntiforgery antiforgery,
+    IOptions<AntiforgeryOptions> antiforgeryOptions,
     IOptions<SecurityOptions> securityOptions,
     IOptions<AccountLockoutOptions> lockoutOptions,
     ILogger<AuthController> logger) : ApiControllerBase
@@ -62,6 +63,7 @@ public sealed class AuthController(
     private readonly SessionRegistry _sessions = sessions;
     private readonly AuditLogger _audit = audit;
     private readonly IAntiforgery _antiforgery = antiforgery;
+    private readonly AntiforgeryOptions _antiforgeryOptions = antiforgeryOptions.Value;
     private readonly SecurityOptions _security = securityOptions.Value;
     private readonly AccountLockoutOptions _lockout = lockoutOptions.Value;
     private readonly ILogger<AuthController> _logger = logger;
@@ -96,6 +98,22 @@ public sealed class AuthController(
         AntiforgeryTokenSet tokens = _antiforgery.GetAndStoreTokens(HttpContext);
 
         return new CsrfTokenDto(tokens.RequestToken ?? string.Empty);
+    }
+
+    /// <summary>
+    /// 身份变化后必须作废 antiforgery 令牌：请求令牌与"签发时的用户身份"绑定，
+    /// 身份一变旧的就再也过不了校验。删掉 cookie，下一个请求就会按新身份重发一对。
+    /// </summary>
+    /// <remarks>
+    /// 不做这一步的症状很隐蔽：**登录之后所有写操作都 400**，
+    /// 服务端日志说 <c>meant for a different claims-based user than the current user</c>，
+    /// 而读操作（GET）全部正常——用户会以为"只有保存坏了"。
+    /// 登出时同样要清：否则匿名身份会继承上一个已登录身份的令牌。
+    /// </remarks>
+    private void ResetAntiforgery()
+    {
+        string name = _antiforgeryOptions.Cookie.Name ?? "XSRF-TOKEN";
+        HttpContext.Response.Cookies.Delete(name);
     }
 
     /// <summary>登录。限流（每 IP 每 5 分钟 5 次）+ 账户锁定（连续 5 次失败锁 15 分钟）。</summary>
@@ -231,6 +249,9 @@ public sealed class AuthController(
             target: CurrentUserName,
             detail: $"用户主动登出（会话 {sessionId ?? "(无)"}）。",
             ct: Ct).ConfigureAwait(false);
+
+        // 身份从"已登录"变回"匿名"，令牌的绑定身份跟着变，必须重发。
+        ResetAntiforgery();
 
         return NoContent();
     }
@@ -620,6 +641,10 @@ public sealed class AuthController(
 
         _logger.LogInformation(
             "用户 {User} 登录成功（会话 {Session}，来源 {Ip}）。", user.UserName, record.Id, ip ?? "未知");
+
+        // 身份刚刚从"匿名"变成"已登录"，而 antiforgery 令牌与签发时的身份绑定：
+        // 不清掉旧 cookie，客户端之后拿到的仍是匿名签发的令牌，**登录后所有写操作都会 400**。
+        ResetAntiforgery();
 
         return record;
     }

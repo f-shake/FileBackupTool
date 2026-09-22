@@ -42,6 +42,18 @@ async function fetchCsrfToken(): Promise<string | null> {
   }
 }
 
+/**
+ * 作废缓存的令牌。**身份变化后必须调用**（登录成功、登出）。
+ *
+ * 服务端的请求令牌与"签发时的用户身份"绑定，身份一变旧令牌就再也过不了校验。
+ * 不清缓存的话，症状是"登录之后所有写操作都 400"，而读操作完全正常——
+ * 用户只会觉得"只有保存坏了"。
+ */
+export function resetCsrfToken(): void {
+  csrfToken = null
+  csrfPending = null
+}
+
 async function ensureCsrfToken(force = false): Promise<string | null> {
   if (USE_MOCK) return null
   if (force) {
@@ -161,10 +173,26 @@ export function normalizeError(error: unknown): NormalizedApiError {
   }
 }
 
+/**
+ * 关掉 axios **内置**的 XSRF 支持。
+ *
+ * ⚠️ 这不是可选项，是必须项。axios 默认会自己读 `XSRF-TOKEN` cookie、把它的值塞进
+ * `X-XSRF-TOKEN` 头（`xsrfCookieName` / `xsrfHeaderName` 的默认值就是这么设的），
+ * **而且它在请求拦截器之后执行**——于是会**覆盖**我们下面设的请求令牌。
+ *
+ * 对 ASP.NET Core 来说那正好是最错的值：它要的是 *request token*，而 cookie 里是配对的
+ * *cookie token*。症状是服务端报
+ * `The cookie token and the request token were swapped`，浏览器里**所有写操作都 400**；
+ * 而用 curl 手测一切正常——因为 curl 没有 axios 的这层"帮忙"。
+ * 这个坑排查了很久，别再把它打开。
+ */
+axios.defaults.withXSRFToken = false
+
 export const http: AxiosInstance = axios.create({
   baseURL: API_BASE,
   timeout: 30_000,
   withCredentials: true,
+  withXSRFToken: false,
   headers: { Accept: 'application/json' },
 })
 
