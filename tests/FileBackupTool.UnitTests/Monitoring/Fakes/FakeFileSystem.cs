@@ -51,6 +51,9 @@ public sealed class FakeFileSystem : IFileSystem
     public bool DirectoryExists(string fullPath) =>
         _entries.TryGetValue(Trim(fullPath), out Entry? e) && e.IsDirectory;
 
+    /// <summary>监控模块的测试不涉及重解析点，恒为 false。</summary>
+    public bool IsReparsePoint(string fullPath) => false;
+
     public FileEntry? GetFile(string fullPath)
     {
         string key = Trim(fullPath);

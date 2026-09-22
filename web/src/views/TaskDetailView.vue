@@ -8,7 +8,7 @@
  * 概览里并入了旧界面的「最后的日志」，并提供旧界面「整理文件」拆分出的两个入口：
  * 完整校验（verify）与回收（collect），外加回收站。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -84,6 +84,14 @@ onMounted(() => {
   void realtime.subscribeTask(props.id)
 })
 
+// **必须退订。** AppLayout 用 `<component :is="Component" :key="route.path">` 切路由，
+// 离开本页即卸载组件；不退订的话服务端分组会一直留着，于是依次看过的**每一个**任务
+// 都会把它的 `backup.progress` / `log.appended` 全量推给这个页面，
+// 而 `tasksStore.progressByJob` / `notices` 会随访问过的任务数单调增长。
+onUnmounted(() => {
+  void realtime.unsubscribeTask(props.id)
+})
+
 watch(
   () => realtime.resyncTick,
   () => {
@@ -93,8 +101,11 @@ watch(
 
 watch(
   () => props.id,
-  (next) => {
+  (next, previous) => {
     void load()
+    // 换任务时**先退旧、再订新**：订阅不去重，只订不退会让这个页面同时留在两个分组里，
+    // 服务端于是把同一个事件推两遍。
+    if (previous !== undefined && previous !== next) void realtime.unsubscribeTask(previous)
     void realtime.subscribeTask(next)
   },
 )

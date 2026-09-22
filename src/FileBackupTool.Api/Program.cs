@@ -269,13 +269,19 @@ builder.Services.ConfigureApplicationCookie(options =>
 // ---- 3.5 antiforgery（设计文档 05 §8：**全部写操作**启用）----
 builder.Services.AddAntiforgery(options =>
 {
-    // 双提交 Cookie 模式：Cookie 里放令牌，前端读出来回填到请求头。
     // 名字是**前端契约**（web/src/api/http.ts），改这里必须同步改前端。
     options.HeaderName = "X-XSRF-TOKEN";
     options.Cookie.Name = "XSRF-TOKEN";
-    // 必须允许 JS 读取：前端要靠 document.cookie 取它，HttpOnly 会让整套机制失效
-    //（表现为"所有保存都报 400"）。它本身不是凭据——攻击者站点跨站读不到它。
-    options.Cookie.HttpOnly = false;
+
+    // **HttpOnly = true。** 这里原来的注释说"必须允许 JS 读取：前端要靠 document.cookie 取它"，
+    // 那句话已经过时了：前端读的是 `GET /api/auth/csrf` 的**响应体**（request token），
+    // 而 axios 内置的读 cookie 行为是用 `withXSRFToken: false` **明确关掉**的
+    //（不关会覆盖请求头，见 09 H3c）。ASP.NET Core 的配对令牌模型下，
+    // cookie 里那个 *cookie token* 本来就不需要被 JS 看见——校验时由服务端自己读。
+    //
+    // 所以这个 cookie 没有理由对脚本可见：XSS 读到它也拿不到 request token，
+    // 而关掉读取面是纯收益（纵深防御）。它仍然会随请求自动发送，HttpOnly 不影响这一点。
+    options.Cookie.HttpOnly = true;
     options.Cookie.SameSite = SameSiteMode.Strict;
     options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
 });
@@ -469,6 +475,19 @@ builder.Services.AddSingleton<IBackupLogSink>(sp => new RealtimeLogSink(
     sp.GetRequiredService<IClock>(),
     sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<RealtimeLogSink>>()));
 
+// StartupSelfHealService：把上次运行遗留的 InProgress 快照标为 Aborted。
+//
+// **必须注册在监控与作业队列之前。** IHostedService 的 StartAsync 是按注册顺序依次 await 的，
+// 而"本进程创建出一条 InProgress 快照"只有一条途径：作业队列的消费循环真的开始执行备份。
+// 所以只要自愈在 JobQueueService 之前跑完，本进程就不可能创建出 InProgress 行，
+// 自愈也就绝不会把一次**正在运行的合法备份**标成 Aborted。
+//
+// 反过来的失败模式很隐蔽：监控服务的钩子③在启动时无条件排一次全量扫描，而它注册在自愈之前、
+// 作业队列的消费循环又先于自愈开跑 —— 那次备份的 InProgress 行正好落在自愈的
+// SELECT 与 UPDATE 之间，于是一个合法快照被写成"上次进程未正常退出"，
+// 并被永久排除在镜像链之外（查询一律只看 Completed）。
+builder.Services.AddHostedService<StartupSelfHealService>();
+
 // 监控模块。它是**可选**的：MonitoringAccess 在它缺席时给出明确的
 // "功能不可用"答复，而不是让整个 API 500。
 builder.Services.AddFileBackupMonitoring();
@@ -499,10 +518,9 @@ builder.Services.AddSingleton<IdentitySeeder>();
 
 // ---- 3.13 后台服务（设计文档 06 §8）----
 // JobQueueService：把引擎的串行作业队列接到宿主生命周期上。
+// （StartupSelfHealService 已挪到监控模块之前注册，原因见那里的注释：
+//   自愈必须在消费循环开始执行任何备份之前完成。）
 builder.Services.AddHostedService<JobQueueService>();
-// StartupSelfHealService：IHostedService 而非 BackgroundService——它必须在
-// Kestrel 开始接受请求**之前**完成（否则启动瞬间会呈现"正在备份"的假状态）。
-builder.Services.AddHostedService<StartupSelfHealService>();
 // SchedulerService：每 60 秒检查一次任务是否到期。
 builder.Services.AddHostedService<SchedulerService>();
 // RetentionService：默认关闭，只有数据库里的显式开关为真才会淘汰。

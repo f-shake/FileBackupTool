@@ -152,12 +152,21 @@ public sealed class GarbageCollector(
         BackupTask task = await GetTaskAsync(taskId, ct).ConfigureAwait(false);
         PhysicalBlobStore blobStore = _blobStores.Create(task.BackupDir);
 
-        // 候选集合：要么是给定的范围（增量回收），要么是全池（手动回收）。
+        // 候选集合：`null` = 全池（手动回收）；非 null = 只检查这些哈希（增量回收）。
+        //
+        // **判据必须是 `is null`，不能是 `is { Count: > 0 }`**。备份尾巴传进来的
+        // `ScopeHashes` 是个集合，一次"什么都没变"的增量备份（6 小时兜底扫描扫完没发现
+        // 变化、或监控触发但内容已稳定）它就是**空集合**：非 null 但 Count == 0。
+        // 用 Count 判据的话这种备份会掉进全池分支——枚举整个 blob 池（百万级文件）、
+        // 每个 2000 一批地查引用，正好是 03 §8 与接口注释要避免的那件事；
+        // 而作业队列是**单消费者串行**的，这段开销会让后面排队的备份/还原一起等。
+        // 空集合的正确含义是"本次没有可能变成垃圾的 blob"，也就是什么都不用查。
+        //
         // 给定的范围来自调用方，**必须过滤掉非法哈希**——否则一个手滑传进来的字符串
         // 会让整个回收以 ArgumentException 结束，而回收是备份流程的收尾步骤。
-        IEnumerable<string> candidates = scopeHashes is { Count: > 0 }
-            ? scopeHashes.Where(h => _hash.IsValidHash(h)).Distinct(StringComparer.Ordinal)
-            : blobStore.EnumerateBlobHashes();
+        IEnumerable<string> candidates = scopeHashes is null
+            ? blobStore.EnumerateBlobHashes()
+            : scopeHashes.Where(h => _hash.IsValidHash(h)).Distinct(StringComparer.Ordinal);
 
         var redundant = new List<string>();
         var buffer = new List<string>(2000);

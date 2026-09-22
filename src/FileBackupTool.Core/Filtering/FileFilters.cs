@@ -184,7 +184,7 @@ public sealed class HardExcludeFileFilter : IFileFilter
 
     private bool IsHardExcluded(string fullPath)
     {
-        if (fullPath.Contains(RecycleBinSegment, StringComparison.OrdinalIgnoreCase))
+        if (ContainsSegment(fullPath, RecycleBinSegment))
         {
             return true;
         }
@@ -195,6 +195,38 @@ public sealed class HardExcludeFileFilter : IFileFilter
             {
                 return true;
             }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 判断路径里是否存在**名为 <paramref name="segment"/> 的路径段**（不是子串）。
+    /// </summary>
+    /// <remarks>
+    /// 这里必须按段比对。用 <c>fullPath.Contains("$RECYCLE.BIN")</c> 会把名字里恰好含
+    /// 这个串的普通文件与目录一起排除，例如 <c>报告$RECYCLE.BIN备份.txt</c> 或 <c>d$RECYCLE.BIN</c>：
+    /// 它们永远进不了任何快照，整个同名目录的子树也不进。而这是**筛选**不是**失败**——
+    /// 快照不会计 <c>FailedFileCount</c>、日志里没有一行痕迹，属于典型的
+    /// "报告成功但实际不完整"，比报错危险得多。设计文档 03 §3 要跳过的是**那个目录**。
+    /// </remarks>
+    private static bool ContainsSegment(string fullPath, string segment)
+    {
+        int start = 0;
+        for (int i = 0; i <= fullPath.Length; i++)
+        {
+            if (i != fullPath.Length && fullPath[i] != '\\' && fullPath[i] != '/')
+            {
+                continue;
+            }
+
+            if (i - start == segment.Length
+                && string.Compare(fullPath, start, segment, 0, segment.Length, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                return true;
+            }
+
+            start = i + 1;
         }
 
         return false;

@@ -65,6 +65,23 @@ public interface IFileSystem
 
     DirectoryEntry? GetDirectory(string fullPath);
 
+    /// <summary>
+    /// 该路径**是否是一个重解析点**（符号链接 / junction），**不跟随**它。
+    /// </summary>
+    /// <remarks>
+    /// 必须与"它是否存在"分开，这是实测出来的（.NET 10 / Windows 10）：
+    /// <list type="bullet">
+    /// <item>指向不存在目标的**文件**链接：<c>File.Exists</c> / <c>FileInfo.Exists</c> 返回 <c>true</c>，
+    /// 且属性里带 <c>ReparsePoint</c> —— 用 <see cref="GetFile"/> 判得到；</item>
+    /// <item>指向不存在目标的**目录**链接：<c>Directory.Exists</c> / <c>DirectoryInfo.Exists</c> 返回
+    /// <c>false</c>（所以 <see cref="GetDirectory"/> 返回 null），但它**仍然**是重解析点，
+    /// <c>Directory.CreateDirectory</c> 与 <c>FileMode.Create</c> 都会跟随它。</item>
+    /// </list>
+    /// 于是"在白名单还原根里预先摆一个悬空的**目录**链接"就能把写入引到白名单之外，
+    /// 而任何基于存在性的检查都看不见它。调用方需要一个不依赖存在性的探针，所以它是独立成员。
+    /// </remarks>
+    bool IsReparsePoint(string fullPath);
+
     void CreateDirectory(string fullPath);
 
     /// <summary>惰性枚举文件。</summary>
@@ -113,4 +130,16 @@ public interface IDirectorySkipReporter
     IReadOnlyList<SkippedDirectory> DrainSkippedDirectories();
 }
 
-public readonly record struct SkippedDirectory(string FullPath, string Reason);
+/// <summary>一个被跳过的目录。</summary>
+/// <param name="FullPath">被跳过的目录的完整路径。</param>
+/// <param name="Reason">为什么跳过（给人看的）。</param>
+/// <param name="Deliberate">
+/// <c>true</c> = **有意**跳过（目录重解析点：进入它可能无限递归）；
+/// <c>false</c> = **失败**跳过（无法枚举：权限、路径过长等）。
+/// <para>
+/// 这个区分不是为了好看：有意跳过不该把自己算进失败数，否则源目录里放几个 junction
+/// 就会让每次备份都显示成"成功（N 个失败）"；而无法枚举是真失败，必须计数。
+/// 早先靠 <paramref name="Reason"/> 的字符串前缀来分辨，那等于把一句人话当协议用。
+/// </para>
+/// </param>
+public readonly record struct SkippedDirectory(string FullPath, string Reason, bool Deliberate = false);

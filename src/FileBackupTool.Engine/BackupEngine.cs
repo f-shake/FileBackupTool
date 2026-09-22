@@ -71,6 +71,40 @@ public sealed class BackupEngine(
     private readonly ILoggerFactory _loggerFactory = loggerFactory;
     private readonly ILogger<BackupEngine> _logger = logger;
 
+    /// <summary>增量链的长度安全界。</summary>
+    /// <remarks>
+    /// 镜像物化把链上的快照 id 作为 <c>IN (...)</c> 列表**内联**进 SQL（每个 id 一个参数，
+    /// 见 `PreviousMirrorTable`），而 SQLite 的参数上限是 32766 —— 超过它，该任务的
+    /// **增量备份与还原会开始显式失败**，直到有人手动跑一次全量把链重置。
+    /// <para>
+    /// 正常情况下这个界碰不到：<c>DecideNextTypeAsync</c> 会在增量数超过
+    /// <c>MaxAutoIncrementBackupCount</c>（界面把它夹到 ≤ 10000）时转全量。
+    /// **但那个决策只在调用方没有显式指定类型时才被咨询**，而
+    /// <c>POST /api/tasks/{id}/backup</c> 可以带 <c>type = "Increment"</c> 绕过它 ——
+    /// 于是"连续请求增量"能把链一路推过上限。这里兜一道，取舍与下面那句
+    /// "宁可多写一份数据，也不能写出一条 replay 不通的坏链"一致。
+    /// </para>
+    /// </remarks>
+    private const int MaxIncrementChainLength = 20000;
+
+    /// <summary>
+    /// 一次局部扫描允许的脏目录数上限，超过就退化为全量扫描。
+    /// </summary>
+    /// <remarks>
+    /// 镜像物化把每个脏目录写成 <b>2 个 SQL 参数</b>（`LIKE key\%` 与 `= key`），
+    /// 加上链上的快照 id（每个 1 个），全部**内联**进同一条 SQL，而 SQLite 的参数上限是 32766。
+    /// <para>
+    /// 8000 的取值依据：参数数 = 1 + 链长 + 2N。链长即使按被夹住的上界 10001 算，
+    /// 8000 个脏目录也只有 1 + 10001 + 16000 = 26002，留在上限之内。
+    /// </para>
+    /// <para>
+    /// 为什么需要这条**绝对**上限而不只依赖占比（<c>LocalScanDegradeRatio</c> = 30%）：
+    /// 源树目录数上万时，30% 以内就能过万 —— 占比判据拦不住，而越界会让**增量备份报错中止**。
+    /// 退化本身是免费的（局部扫描只是省读，全量总是更完整）。
+    /// </para>
+    /// </remarks>
+    private const int MaxDirtyScopeCount = 8000;
+
     public async Task<BackupRunResult> RunAsync(
         Guid taskId,
         SnapshotType? requestedType,
@@ -87,6 +121,10 @@ public sealed class BackupEngine(
 
         PhysicalBlobStore blobStore = _blobStores.Create(task.BackupDir);
         blobStore.CleanTemporary();
+
+        // 先丢弃"被跳过的目录"队列里的残留。它挂在单例文件系统上，监控扫描等其它路径
+        // 也会往里写——不先清一次，末尾那次上报就会把不属于本次备份的目录算进来。
+        DrainSkipped();
 
         SnapshotType type = requestedType ?? await _chains.DecideNextTypeAsync(task, ct).ConfigureAwait(false);
         List<string>? dirtyScopes = NormalizeDirtyScopes(task, dirtyRelativePaths);
@@ -115,6 +153,36 @@ public sealed class BackupEngine(
             }
         }
 
+        // 链长安全界。显式请求增量会绕过 DecideNextTypeAsync 的"超限转全量"（见常量说明），
+        // 所以这里独立兜一道，而不是依赖那个决策被咨询过。
+        if (type == SnapshotType.Increment && previousChain is { Count: > MaxIncrementChainLength })
+        {
+            _logger.LogWarning(
+                "任务「{Task}」的增量链已有 {Count} 个快照，超过安全界 {Max}，本次退化为全量。",
+                task.Name, previousChain.Count, MaxIncrementChainLength);
+
+            await LogAsync(task.Id, null, LogLevel.Warning,
+                $"增量链已有 {previousChain.Count} 个快照（安全界 {MaxIncrementChainLength}），"
+                + "本次退化为全量备份，以免镜像物化的 SQL 参数超过 SQLite 上限。",
+                null, ct).ConfigureAwait(false);
+
+            type = task.DefaultFullType;
+            previousChain = null;
+        }
+
+        // **局部扫描只对增量有意义**：增量的未触及目录靠上一个镜像"继承"（03 §5.4）。
+        // 全量没有可继承的上一个镜像，它的语义是"一个快照仍然覆盖整个源"（03 §5.4）。
+        //
+        // 所以一旦本次跑的是全量，脏目录**必须丢弃**。否则这个"全量"快照的镜像只包含
+        // 脏目录子树，而它会被后续增量当作基准 → 链从此长期不一致，抢救清单还会被
+        // 重写成只剩脏子树的片。这条极容易触发：任务开着监控时，只要有文件变动
+        // 就会带着脏目录触发备份，而"还没有任何全量"或"增量数超限"都会判定为全量——
+        // 于是**第一个快照就可能是一个只覆盖变更目录的坏全量**。
+        if (type != SnapshotType.Increment)
+        {
+            dirtyScopes = null;
+        }
+
         var snapshot = new BackupSnapshot
         {
             TaskId = task.Id,
@@ -132,6 +200,9 @@ public sealed class BackupEngine(
 
         var context = new RunContext(task, snapshot);
         string? abortReason = null;
+        // 与 abortReason 分开：取消与"因失败率/异常中止"都写 Aborted，但作业层需要区分
+        // （见 BackupRunResult.Canceled 的说明）。
+        bool canceled = false;
 
         try
         {
@@ -154,6 +225,7 @@ public sealed class BackupEngine(
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             abortReason = "用户取消";
+            canceled = true;
             snapshot.Status = SnapshotStatus.Aborted;
             _logger.LogInformation("备份快照 #{Id} 被取消。", snapshot.Id);
         }
@@ -174,6 +246,11 @@ public sealed class BackupEngine(
                 CancellationToken.None).ConfigureAwait(false);
             _logger.LogError(ex, "备份快照 #{Id} 异常终止。", snapshot.Id);
         }
+
+        // 跳过的目录必须交出来（03 §7「不静默」），见 ReportSkippedDirectoriesAsync。
+        // 放在这里而不是枚举结束时：两条路径（全量/增量）都会跳过目录，收口在同一个地方，
+        // 而且要在 ApplyCountersToSnapshot 之前——它要往 FailedFileCount 上计数。
+        await ReportSkippedDirectoriesAsync(task.Id, snapshot.Id, context).ConfigureAwait(false);
 
         ApplyCountersToSnapshot(context);
         snapshot.EndTime = _clock.UtcNow;
@@ -207,6 +284,11 @@ public sealed class BackupEngine(
                   + $"删除 {snapshot.DeletedFileCount}，失败 {snapshot.FailedFileCount}，"
                   + $"写入 {snapshot.TotalBytes} 字节，镜像 {snapshot.ImageFileCount} 个文件 / "
                   + $"{snapshot.ImageTotalBytes} 字节。"
+                  // 跳过的目录也要出现在摘要里——否则用户只会看到"失败 0"，
+                  // 而那棵树根本没被备份（03 §7 的立场是"不静默"）。
+                  + (context.SkippedDirectoryCount > 0
+                      ? $"（另有 {context.SkippedDirectoryCount} 个目录未被进入，详见上一条日志。）"
+                      : string.Empty)
                 : $"备份未完成（{snapshot.Status}）：{abortReason}",
             null, CancellationToken.None).ConfigureAwait(false);
 
@@ -214,7 +296,10 @@ public sealed class BackupEngine(
             snapshot.Id, snapshot.Type, snapshot.Status,
             snapshot.CreatedFileCount, snapshot.ModifiedFileCount, snapshot.DeletedFileCount,
             snapshot.FailedFileCount, snapshot.TotalBytes,
-            snapshot.ImageFileCount, snapshot.ImageTotalBytes, abortReason);
+            snapshot.ImageFileCount, snapshot.ImageTotalBytes, abortReason)
+        {
+            Canceled = canceled,
+        };
     }
 
     // ------------------------------------------------------------------
@@ -266,6 +351,7 @@ public sealed class BackupEngine(
                     context.Created++;
                     context.CreatedBytes += entry.Length;
                     context.Processed++;
+                    MarkFileSucceeded(context);
                 }
                 catch (Exception ex) when (IsPerFileFailure(ex))
                 {
@@ -346,6 +432,7 @@ public sealed class BackupEngine(
                     {
                         // 未变化：**不写记录**。镜像里已有的那条记录继续生效。
                         context.Processed++;
+                        MarkFileSucceeded(context);
                         continue;
                     }
 
@@ -372,6 +459,7 @@ public sealed class BackupEngine(
                     }
 
                     context.Processed++;
+                    MarkFileSucceeded(context);
                 }
                 catch (Exception ex) when (IsPerFileFailure(ex))
                 {
@@ -523,6 +611,102 @@ public sealed class BackupEngine(
         records.Clear();
     }
 
+    /// <summary>
+    /// 成功处理完一个文件后清零"连续失败"计数。
+    /// </summary>
+    /// <remarks>
+    /// 这个计数器的语义是<b>连续</b>失败（03 §7.1：失败率超阈值**或连续失败 100 次**→ 中止）。
+    /// 不在成功路径上归零的话，它就退化成"累计失败 100 次"，于是一个源目录里散布着
+    /// 100 个互不相关的老旧坏文件也会中止整次备份 —— 那正是这个指标想避免的假阳性。
+    /// 失败率阈值负责识别"整片坏掉"，连续计数负责识别"卡在某个点上"，两者分工不同。
+    /// </remarks>
+    private static void MarkFileSucceeded(RunContext context) => context.ConsecutiveFailures = 0;
+
+    /// <summary>
+    /// 取走并上报本次枚举时被跳过的目录。
+    /// </summary>
+    /// <remarks>
+    /// <c>PhysicalFileSystem</c> 把两类目录记进一个队列：**目录重解析点**（junction / 符号链接，
+    /// 03 §3 明确不进入——进入它可能无限递归）与**无法枚举的目录**（权限、路径过长等，属失败）。
+    /// 这个队列原来**只有 FsController 一个消费者**，而且用的是它自己 new 的私有实例，
+    /// 引擎侧那个单例队列因此只入不出：
+    /// <list type="bullet">
+    /// <item>用户永远不知道有子树没被备份——快照照样报"备份完成：失败 0"（03 §7 要的正是"不静默"）；</item>
+    /// <item>增量备份下更糟：无法枚举目录里那些**仍然存在**的文件的旧镜像行不会被
+    /// <c>TakeBatchAsync</c> 取走，于是被当成删除写成墓碑——镜像里文件消失，全程无提示。</item>
+    /// </list>
+    /// 只入不出还会让这个队列随进程生命周期无界增长。
+    /// </remarks>
+    /// <summary>
+    /// 取走"被跳过的目录"清单。
+    /// </summary>
+    /// <remarks>
+    /// <c>IDirectorySkipReporter</c> 是**可选**接口（09 B3 的措辞就是"通过可选的
+    /// <c>IDirectorySkipReporter</c> 交出来"），所以这里按可选处理：
+    /// 实现它的文件系统（<c>PhysicalFileSystem</c>）才报得出东西，
+    /// 别的实现（测试里的内存文件系统）返回空清单即可。
+    /// </remarks>
+    private IReadOnlyList<SkippedDirectory> DrainSkipped() =>
+        _fs is IDirectorySkipReporter reporter ? reporter.DrainSkippedDirectories() : [];
+
+    /// <summary>
+    /// 取走并上报本次枚举时被跳过的目录。
+    /// </summary>
+    /// <remarks>
+    /// <c>PhysicalFileSystem</c> 把两类目录记进一个队列：**目录重解析点**（junction / 符号链接，
+    /// 03 §3 明确不进入——进入它可能无限递归）与**无法枚举的目录**（权限、路径过长等，属失败）。
+    /// 这个队列原来**只有 FsController 一个消费者**，而且用的是它自己 new 的私有实例，
+    /// 引擎侧那个单例队列因此只入不出：
+    /// <list type="bullet">
+    /// <item>用户永远不知道有子树没被备份——快照照样报"备份完成：失败 0"（03 §7 要的正是"不静默"）；</item>
+    /// <item>增量备份下更糟：无法枚举目录里那些**仍然存在**的文件的旧镜像行不会被
+    /// <c>TakeBatchAsync</c> 取走，于是被当成删除写成墓碑——镜像里文件消失，全程无提示。
+    /// <b>注意：这一步只是"上报"，并没有"阻止"</b>——那些文件仍然会被墓碑化。
+    /// 要不要把"源目录无法枚举"升级为中止整次备份，是一个待定项（见 09 J5）。</item>
+    /// </list>
+    /// 只入不出还会让这个队列随进程生命周期无界增长。
+    /// </remarks>
+    private async Task ReportSkippedDirectoriesAsync(Guid taskId, int snapshotId, RunContext context)
+    {
+        IReadOnlyList<SkippedDirectory> skipped;
+        try
+        {
+            skipped = DrainSkipped();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "读取「被跳过的目录」清单失败，本次不记录。");
+            return;
+        }
+
+        if (skipped.Count == 0)
+        {
+            return;
+        }
+
+        // 只有"无法枚举"才算失败。有意跳过的重解析点若也计数，源目录里放几个 junction
+        // 就会让每次备份都显示成"成功（N 个失败）"——那会把真正的失败淹掉。
+        int unreadable = skipped.Count(s => !s.Deliberate);
+        context.SkippedDirectoryCount = skipped.Count;
+        context.Failed += unreadable;
+
+        string sample = string.Join("、", skipped.Take(5).Select(s => s.FullPath));
+        string tail = skipped.Count > 5 ? " …" : string.Empty;
+
+        await LogAsync(
+                taskId, snapshotId,
+                unreadable > 0 ? LogLevel.Warning : LogLevel.Information,
+                unreadable > 0
+                    ? $"有 {skipped.Count} 个目录未被进入，其中 {unreadable} 个无法枚举（已计入失败）：{sample}{tail}"
+                    : $"有 {skipped.Count} 个目录未被进入（均为符号链接/junction，属有意跳过）：{sample}{tail}",
+                string.Join(Environment.NewLine, skipped.Select(s => $"{s.FullPath} —— {s.Reason}")),
+                CancellationToken.None)
+            .ConfigureAwait(false);
+
+        _logger.LogInformation("快照 #{Id} 跳过了 {Count} 个目录（其中无法枚举 {Bad} 个）。",
+            snapshotId, skipped.Count, unreadable);
+    }
+
     private async Task RegisterFileFailureAsync(
         RunContext context,
         string path,
@@ -646,7 +830,32 @@ public sealed class BackupEngine(
             }
         }
 
-        return cleaned.Count == 0 ? null : DirtyDirectorySet.Compact(cleaned, _normalizer);
+        if (cleaned.Count == 0)
+        {
+            return null;
+        }
+
+        List<string> compacted = DirtyDirectorySet.Compact(cleaned, _normalizer);
+
+        // **脏目录数的绝对上限。** 镜像物化把每个脏目录写成 **2 个 SQL 参数**
+        // （`LIKE $likeN` 与 `= $eqN`），加上链上的快照 id，全部内联进同一条 SQL，
+        // 而 SQLite 的参数上限是 32766。
+        //
+        // 只靠 `LocalScanDegradeRatio`（占比超过 30% 才退化全量）**不够**：源树目录数上万时，
+        // 30% 以内就可能过万，而约 16384 个脏目录会让**增量备份以 SQLite 报错中止** ——
+        // 那是"核心功能在目标规模上停止工作"，比还原失败严重得多（还原失败用户还能改范围）。
+        //
+        // 超过就退化为全量扫描。这个退化在语义上是**免费的**：局部扫描只是省读，
+        // 全量总是更完整；而且它与"占比超限退化"是同一个取舍。
+        if (compacted.Count > MaxDirtyScopeCount)
+        {
+            _logger.LogInformation(
+                "脏目录数 {Count} 超过上限 {Max}，本次退化为全量扫描（避免镜像物化的 SQL 参数越界）。",
+                compacted.Count, MaxDirtyScopeCount);
+            return null;
+        }
+
+        return compacted;
     }
 
     private string GetRelativePath(BackupTask task, string fullPath) =>
@@ -782,6 +991,9 @@ public sealed class BackupEngine(
         public long PreviousImageTotalBytes { get; set; }
 
         public int MirrorInconsistencyCount { get; set; }
+
+        /// <summary>本次枚举时跳过的目录数（含**有意**跳过的重解析点）。</summary>
+        public int SkippedDirectoryCount { get; set; }
 
         public HashSet<string> TouchedRelativePaths { get; } = new(StringComparer.OrdinalIgnoreCase);
 

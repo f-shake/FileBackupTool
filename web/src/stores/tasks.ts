@@ -6,7 +6,7 @@
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { asApiError, tasksApi } from '@/api'
+import { asApiError, monitoringApi, tasksApi } from '@/api'
 import type {
   BackupProgressEvent,
   BackupTask,
@@ -31,7 +31,7 @@ export const useTasksStore = defineStore('tasks', () => {
   const error = ref<NormalizedApiError | null>(null)
   /** jobId → 最近一次进度事件 */
   const progressByJob = ref<Record<string, BackupProgressEvent>>({})
-  /** jobId → taskId（`job.started` 给出） */
+  /** jobId → taskId。由 `job.started` 给出，并由 `rehydrateRunningJobs()` 从 REST 补齐。 */
   const jobTask = ref<Record<string, string>>({})
   /** taskId → 刚发起的即时操作提示 */
   const notices = ref<Record<string, string>>({})
@@ -203,6 +203,29 @@ export const useTasksStore = defineStore('tasks', () => {
   /** 供页面在收到 resync 信号时调用 */
   function onResync(): void {
     void refreshQuietly()
+    void rehydrateRunningJobs()
+  }
+
+  /**
+   * 从 REST 补回"哪个作业属于哪个任务"。
+   *
+   * `jobTask` 原来只由 `job.started` 填充，而那是**一次性**事件：
+   * 在作业已经跑起来**之后**才打开或刷新页面的用户永远收不到它，
+   * 于是 `liveProgress` 查不到 taskId → 进度条停在不确定态、没有文件计数、
+   * 一直空转到作业结束——而 `backup.progress` 事件其实一直在推（只是被丢掉了）。
+   * 这正是 07 §6「重连后必须用 REST 拉一次全量状态」要补的那一步。
+   */
+  async function rehydrateRunningJobs(): Promise<void> {
+    try {
+      const snapshot = await monitoringApi.listJobs()
+      const next = { ...jobTask.value }
+      for (const job of [snapshot.running, ...snapshot.queued]) {
+        if (job?.taskId) next[job.jobId] = job.taskId
+      }
+      jobTask.value = next
+    } catch {
+      // 补不上只是让进度条退化成不确定态，不该打断别的东西（也不该覆盖已有错误态）
+    }
   }
 
   return {

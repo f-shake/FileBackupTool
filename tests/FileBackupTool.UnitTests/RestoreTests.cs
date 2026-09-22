@@ -24,6 +24,51 @@ public class RestoreTests
         return h;
     }
 
+    /// <summary>
+    /// 白名单里的**目录重解析点**必须让还原拒绝写入，而不是跟随它写到白名单之外。
+    /// </summary>
+    /// <remarks>
+    /// 这是"任意文件写入"这条头号后果（05 §1.1）的防线，而白名单本身是**纯字符串比较**
+    /// （`DirectoryRelationshipValidator` 连 `System.IO` 都没引），挡不住链接。
+    /// <para>
+    /// 关键在于用**悬空**的链接做用例：实测（.NET 10 / Windows 10）指向不存在目标的
+    /// **目录**链接，`Directory.Exists` / `DirectoryInfo.Exists` 返回 <c>false</c>，
+    /// 所以任何基于存在性的检查都看不见它；而 `Directory.CreateDirectory` 与
+    /// `FileMode.Create` 都会跟随它。（悬空的**文件**链接没有这个问题：`FileInfo.Exists`
+    /// 对它返回 <c>true</c>，属性里也带 `ReparsePoint`。）
+    /// </para>
+    /// <para>
+    /// 真实 Windows 上**目录 junction 不需要管理员权限**即可创建，所以这不是纯理论情形。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task 还原拒绝穿过白名单里的悬空目录重解析点()
+    {
+        await using TestHarness h = await WithRootsAsync();
+        var task = await h.CreateTaskAsync();
+
+        h.AddSourceFile(@"evil\danger.txt", "payload", T1);
+        BackupRunResult run = await h.BackupAsync(task.Id);
+
+        // 在白名单还原根**之内**摆一个悬空的目录重解析点
+        h.Fs.AddReparseDirectory(TestHarness.Combine(TestHarness.RestoreRoot, "evil"));
+
+        RestorePlan plan = await h.Restore.PlanAsync(
+            new RestoreRequest(task.Id, run.SnapshotId, [], TestHarness.RestoreRoot, RestoreConflictPolicy.Skip),
+            CancellationToken.None);
+
+        // 必须在**预演**阶段就把它标为不可还原（04 §1.6 的"不静默"），
+        // 而不是等执行时才发现。
+        Assert.Equal(0, plan.PlannedCount);
+        Assert.Equal(1, plan.UnavailableCount);
+        Assert.Contains("重解析点", plan.UnavailableEntries.Single().UnavailableReason);
+
+        // 执行阶段会**重新**判一次（计划可能很旧），结果同样是不写。
+        await h.Restore.ExecuteAsync(plan, null, CancellationToken.None);
+        Assert.Null(h.Fs.ReadText(TestHarness.Combine(TestHarness.RestoreRoot, @"evil\danger.txt")));
+    }
+
+
     // ------------------------------------------------------------------
     // 往返一致性（CI 硬门槛）
     // ------------------------------------------------------------------

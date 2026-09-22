@@ -88,7 +88,20 @@ public sealed record TotpSetupResultDto
     public string? QrCodePngBase64 { get; init; }
 }
 
-public sealed record TotpConfirmRequestDto(string? Code);
+/// <summary>
+/// `POST /api/auth/totp/setup` 的请求体。
+/// </summary>
+/// <remarks>
+/// <see cref="Password"/> **只在"已绑定情况下重绑"时必填**（首次绑定不需要：用户刚刚用密码登录过）。
+/// 原因见 <c>AuthController.RequireCurrentPasswordAsync</c> 的说明。
+/// </remarks>
+public sealed record TotpSetupRequestDto(string? Password = null);
+
+/// <summary>
+/// `POST /api/auth/totp/confirm` 的请求体。
+/// </summary>
+/// <remarks><see cref="Password"/> 的必填规则同 <see cref="TotpSetupRequestDto"/>。</remarks>
+public sealed record TotpConfirmRequestDto(string? Code, string? Password = null);
 
 public sealed record RecoveryCodesRequestDto(string? Password);
 

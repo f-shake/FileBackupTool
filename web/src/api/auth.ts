@@ -42,14 +42,21 @@ export function getCurrentUser(): Promise<CurrentUser> {
   return get<CurrentUser>('/auth/me')
 }
 
-/** `POST /api/auth/totp/setup` —— 生成 TOTP 密钥与二维码 */
-export function setupTotp(): Promise<TotpSetupResult> {
-  return post<TotpSetupResult>('/auth/totp/setup')
+/**
+ * `POST /api/auth/totp/setup` —— 取 TOTP 密钥与 otpauth URI。
+ *
+ * ⚠️ `password` **只在"已绑定状态下的重绑"时必填**：此时服务端返回的正是**当前生效**的密钥，
+ * 而且随后的 `confirm` 会换掉全部恢复码——两者合起来等于签发一把永久钥匙，
+ * 所以必须重新证明身份（首次绑定不需要，用户刚刚用密码登录过）。
+ * 不传会得到 400 `当前密码不正确`。
+ */
+export function setupTotp(password?: string): Promise<TotpSetupResult> {
+  return post<TotpSetupResult>('/auth/totp/setup', { password: password ?? null })
 }
 
-/** `POST /api/auth/totp/confirm` —— 确认绑定（返回一次性恢复码） */
-export function confirmTotp(code: string): Promise<RecoveryCodesResult> {
-  return post<RecoveryCodesResult>('/auth/totp/confirm', { code })
+/** `POST /api/auth/totp/confirm` —— 确认绑定（返回一次性恢复码）。`password` 的必填规则同上。 */
+export function confirmTotp(code: string, password?: string): Promise<RecoveryCodesResult> {
+  return post<RecoveryCodesResult>('/auth/totp/confirm', { code, password: password ?? null })
 }
 
 /** `POST /api/auth/totp/recovery-codes` —— 重新生成恢复码 */

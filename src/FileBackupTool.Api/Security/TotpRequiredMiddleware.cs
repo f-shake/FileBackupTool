@@ -30,10 +30,29 @@ public sealed class TotpRequiredMiddleware(
     IOptions<SecurityOptions> securityOptions,
     ILogger<TotpRequiredMiddleware> logger)
 {
-    /// <summary>绑定前仍然放行的路径前缀——都是"认证自身"的端点。</summary>
-    private static readonly string[] AllowedPrefixes =
+    /// <summary>
+    /// 绑定前仍然放行的路径——**逐个列出**，不写前缀。
+    /// </summary>
+    /// <remarks>
+    /// 这里曾经写的是前缀 <c>/api/auth</c>，那等于把**整棵**认证子树都放行，
+    /// 其中包含 <c>GET /api/auth/sessions</c>（可枚举其它设备的会话）与
+    /// <c>DELETE /api/auth/sessions/{id}</c>（可把其它会话踢掉）。
+    /// 而按类注释对"受限会话"的定义，它只该能做三件事：改密码、绑定 TOTP、看 /me——
+    /// 管理其它会话不在其中，那属于"业务功能"。
+    /// <para>
+    /// 刻意**不**放行 <c>totp/recovery-codes</c>：它自己就会在未绑定时抛 <c>TOTP_NOT_BOUND</c>，
+    /// 列在这里只会让意图变模糊。
+    /// </para>
+    /// </remarks>
+    private static readonly string[] AllowedRoutes =
     [
-        "/api/auth",
+        "/api/auth/me",
+        "/api/auth/csrf",
+        "/api/auth/login",
+        "/api/auth/logout",
+        "/api/auth/password",
+        "/api/auth/totp/setup",
+        "/api/auth/totp/confirm",
     ];
 
     private readonly RequestDelegate _next = next;
@@ -127,9 +146,14 @@ public sealed class TotpRequiredMiddleware(
             return false;
         }
 
-        foreach (string prefix in AllowedPrefixes)
+        foreach (string route in AllowedRoutes)
         {
-            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            // 精确匹配，或它下面的子路径。**不能用裸 StartsWith**——
+            // 那样 `/api/auth/meXXX` 也会被当成 `/api/auth/me` 白白放行。
+            if (value.Equals(route, StringComparison.OrdinalIgnoreCase)
+                || (value.Length > route.Length
+                    && value[route.Length] == '/'
+                    && value.StartsWith(route, StringComparison.OrdinalIgnoreCase)))
             {
                 return false;
             }

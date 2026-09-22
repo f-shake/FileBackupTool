@@ -620,6 +620,75 @@ public class EngineTests
 
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// **全量快照必须覆盖整个源，哪怕这次是带着脏目录触发的。**
+    /// </summary>
+    /// <remarks>
+    /// 这是实测修掉的一个静默数据损坏：监控触发时会带着"脏目录"来，而按策略这一次可能要跑
+    /// **全量**（例如还没有任何 Full，或增量数已超上限）。全量没有可继承的上一个镜像，
+    /// 它的语义是"一个快照仍然覆盖整个源"（03 §5.4）——脏目录必须被丢弃。
+    /// <para>
+    /// 不丢的话，这个"全量"的镜像只含被扫到的那棵子树，而它会被后续增量当作基准：
+    /// 链从此长期不一致，抢救清单还会被重写成只剩那棵子树。而且这**极容易触发**——
+    /// 任务刚打开监控、第一个快照之前正好有个文件被改动，就会走到这条路径。
+    /// </para>
+    /// <para>
+    /// 反向的守卫见下一条：增量**必须**继续尊重脏目录（局部扫描是它的语义），
+    /// 所以修复只对非增量生效。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task 全量备份即使带着脏目录也必须覆盖整个源()
+    {
+        await using TestHarness h = await TestHarness.CreateAsync();
+        var task = await h.CreateTaskAsync();
+
+        h.AddSourceFile("root.txt", "root", T1);
+        h.AddSourceFile(@"docs\doc.txt", "doc", T1);
+        h.AddSourceFile(@"media\pic.txt", "pic", T1);
+
+        BackupRunResult full = await h.BackupAsync(task.Id, SnapshotType.Full, [@"docs"]);
+
+        Assert.Equal(SnapshotStatus.Completed, full.Status);
+
+        Dictionary<string, string> image = await h.ReadImageAsync(task.Id, full.SnapshotId);
+        Assert.Equal(3, image.Count);
+        Assert.True(image.ContainsKey("root.txt"), "源目录根下的文件必须在这个全量镜像里");
+        Assert.True(image.ContainsKey(@"docs\doc.txt"), "脏目录里的文件在镜像里");
+        Assert.True(image.ContainsKey(@"media\pic.txt"), "**未**被列为脏目录的那棵子树也必须在这个全量镜像里");
+    }
+
+    /// <summary>增量的反向守卫：局部扫描是增量的语义，必须继续尊重脏目录。</summary>
+    [Fact]
+    public async Task 增量备份带脏目录时只重扫该目录_未变化目录由镜像继承()
+    {
+        await using TestHarness h = await TestHarness.CreateAsync();
+        var task = await h.CreateTaskAsync();
+
+        h.AddSourceFile("root.txt", "root", T1);
+        h.AddSourceFile(@"docs\doc.txt", "doc-v1", T1);
+        h.AddSourceFile(@"media\pic.txt", "pic", T1);
+
+        BackupRunResult full = await h.BackupAsync(task.Id, SnapshotType.Full);
+        // ReadImageAsync 给的是 路径 → **内容哈希**（不是内容）
+        Dictionary<string, string> before = await h.ReadImageAsync(task.Id, full.SnapshotId);
+
+        // 只动 docs 里的一个文件
+        h.AddSourceFile(@"docs\doc.txt", "doc-v2", T2);
+
+        BackupRunResult inc = await h.BackupAsync(task.Id, SnapshotType.Increment, [@"docs"]);
+
+        Assert.Equal(1, inc.CreatedFileCount + inc.ModifiedFileCount);
+
+        Dictionary<string, string> after = await h.ReadImageAsync(task.Id, inc.SnapshotId);
+        Assert.Equal(3, after.Count);
+        Assert.NotEqual(before[@"docs\doc.txt"], after[@"docs\doc.txt"]);   // 改了 → 新哈希
+        Assert.Equal(before["root.txt"], after["root.txt"]);               // 未触及 → 由镜像继承
+        Assert.Equal(before[@"media\pic.txt"], after[@"media\pic.txt"]);   // 子树外 → 必须继承下来
+    }
+
+    // ------------------------------------------------------------------
+
     /// <summary>第 N 次收到进度就取消——用来稳定地制造"跑到一半被取消"。</summary>
     private sealed class CancelOnNthReport(CancellationTokenSource cts, int n) : IProgress<JobProgress>
     {

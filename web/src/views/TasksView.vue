@@ -4,7 +4,7 @@
  *
  * 卡片式而非表格 —— 需要展示的信息（状态、进度、监控模式、下次计划）比表格列更丰富。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -26,14 +26,12 @@ import PathText from '@/components/PathText.vue'
 import StatePlaceholder from '@/components/StatePlaceholder.vue'
 import TaskEditorDialog from '@/components/TaskEditorDialog.vue'
 import { monitorStateLabels, monitorStateTagType, taskStatusLabels, taskStatusTagType } from '@/locales/zh-CN'
-import { useRealtimeStore } from '@/stores/realtime'
 import { useTasksStore } from '@/stores/tasks'
 import { formatDateTime } from '@/utils/datetime'
 import { formatCount } from '@/utils/format'
 
 const router = useRouter()
 const store = useTasksStore()
-const realtime = useRealtimeStore()
 
 const editorVisible = ref(false)
 const editing = ref<BackupTask | null>(null)
@@ -59,13 +57,11 @@ async function loadSettings(): Promise<void> {
   }
 }
 
-// 收到重连/轮询信号后重新拉取（07 §6：断线期间的事件已丢失，必须整体重拉）
-watch(
-  () => realtime.resyncTick,
-  () => {
-    if (!listError.value) void store.refreshQuietly()
-  },
-)
+// 重连/轮询信号后的重新拉取由 **App.vue 统一负责**（它 watch `realtime.resyncTick`
+// 后调 `tasks.onResync()`，也就是本 store 的 `refreshQuietly()`）。
+// 这里曾经也 watch 同一个 `resyncTick` 再拉一次，于是每个心跳发出**两条完全一样**的
+// `GET /api/tasks`（列表越大重复开销越大），而停在设置页/审计页时根组件那次也照样在刷任务列表。
+// 根组件那处是全局需要的，所以删掉这里这条。
 
 function openCreate(): void {
   editing.value = null

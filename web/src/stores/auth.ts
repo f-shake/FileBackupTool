@@ -50,13 +50,40 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  /** 幂等启动：并发调用只会真正请求一次。路由守卫与 App.vue 共用。 */
+  /**
+   * 幂等启动：**一次会话内只真正请求一次**。路由守卫与 App.vue 共用。
+   *
+   * ⚠️ 别把 `bootPromise` 在完成后置回 `null`——那会让**每一次路由跳转**都重新 bootstrap：
+   * `bootstrap()` 的第一件事是 `status.value = 'unknown'`，而 App.vue 用
+   * `v-if="auth.status === 'unknown'"` 把整个 `<router-view>` 换成启动页。
+   * 症状是每次点导航整屏闪一次"正在确认登录状态…"，并且原页面组件被**销毁重建**
+   * （列表滚动位置、筛选条件、打开的弹窗全丢）；后端慢时，闪烁时长正好是一次
+   * `/api/auth/me` 的往返。
+   *
+   * 需要"重新确认"时显式传 `force`（例如启动错误卡片上的"重试"）。
+   */
   let bootPromise: Promise<void> | null = null
+  let booted = false
+
   async function ensureBootstrapped(force = false): Promise<void> {
-    if (force) bootPromise = null
-    if (!bootPromise) bootPromise = bootstrap()
+    if (force) {
+      bootPromise = null
+      booted = false
+    }
+
+    // 已经判定过就直接返回——这条是**每次导航**都会走的路径。
+    // 判 `booted` 而不是 `status !== 'unknown'`：登录成功后 status 已是 'authenticated'，
+    // 那种情况同样不该再打一次 /api/auth/me。
+    if (booted && !bootPromise) return
+
+    if (!bootPromise) {
+      bootPromise = bootstrap().finally(() => {
+        booted = true
+        bootPromise = null
+      })
+    }
+
     await bootPromise
-    bootPromise = null
   }
 
 
@@ -92,12 +119,13 @@ export const useAuthStore = defineStore('auth', () => {
 
   /* ------------------------- TOTP 强制绑定 ------------------------- */
 
-  async function setupTotp(): Promise<TotpSetupResult> {
-    return authApi.setupTotp()
+  /** `password` 只在已绑定状态下的重绑时必填（见 `api/auth.ts` 的说明）。 */
+  async function setupTotp(password?: string): Promise<TotpSetupResult> {
+    return authApi.setupTotp(password)
   }
 
-  async function confirmTotp(code: string): Promise<string[]> {
-    const result = await authApi.confirmTotp(code)
+  async function confirmTotp(code: string, password?: string): Promise<string[]> {
+    const result = await authApi.confirmTotp(code, password)
     await refreshUser()
     return result.recoveryCodes
   }

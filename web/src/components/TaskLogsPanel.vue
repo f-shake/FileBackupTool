@@ -54,7 +54,11 @@ const level = ref<LogLevel | 'All'>(props.initialLevel)
 const range = ref<[string, string] | null>(props.initialRange)
 const keyword = ref(props.initialKeyword)
 
-/** 「跟随」：新日志自动插入并滚到底部 */
+/**
+ * 「跟随最新」：新日志自动插入并滚到**顶部**。
+ *
+ * 顶部而不是底部，是因为服务端按 `Time DESC` 返回——最新在前（见 `log.appended` 处理处）。
+ */
 const following = ref(true)
 const liveCount = ref(0)
 const scrollbar = ref<{ setScrollTop: (v: number) => void } | null>(null)
@@ -115,7 +119,12 @@ realtime.on('log.appended', (payload) => {
   const matchesLevel = level.value === 'All' || payload.level === level.value
 
   if (onFirstPage && !filtered) {
-    entries.value.push({
+    // **新日志插到最前面**，不能 push 到末尾。
+    // 服务端的排序是 `Time DESC, Id DESC`（`LogsController` 的 `.OrderByDescending(l => l.Time)
+    // .ThenByDescending(l => l.Id)`），也就是说这个数组**最新在前**。
+    // 原来 push 到末尾 + 滚到底部，等于把新行插在"最旧"那一端，再把视图滚到最旧的日志处——
+    // 用户勾了"跟随最新"，看到的却是几小时前的那一批。
+    entries.value.unshift({
       id: -Date.now(), // 临时负数 id，刷新后由服务端真 id 取代
       taskId: payload.taskId,
       snapshotId: payload.snapshotId,
@@ -124,10 +133,12 @@ realtime.on('log.appended', (payload) => {
       message: payload.message,
       hasDetail: false,
     })
-    if (entries.value.length > PAGE_SIZE) entries.value.splice(0, entries.value.length - PAGE_SIZE)
+    // 超出页容量时从**末尾**丢弃（末尾是最旧的）
+    if (entries.value.length > PAGE_SIZE) entries.value.splice(PAGE_SIZE)
     total.value += 1
     if (following.value) {
-      void nextTick(() => scrollbar.value?.setScrollTop(Number.MAX_SAFE_INTEGER))
+      // "跟随最新"在最新在前的列表里 = 滚到**顶部**
+      void nextTick(() => scrollbar.value?.setScrollTop(0))
     }
   } else if (matchesLevel) {
     liveCount.value += 1
@@ -137,7 +148,7 @@ realtime.on('log.appended', (payload) => {
 watch(following, (on) => {
   if (on) {
     liveCount.value = 0
-    void nextTick(() => scrollbar.value?.setScrollTop(Number.MAX_SAFE_INTEGER))
+    void nextTick(() => scrollbar.value?.setScrollTop(0))
   }
 })
 

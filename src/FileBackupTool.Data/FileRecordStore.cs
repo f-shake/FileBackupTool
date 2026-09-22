@@ -163,21 +163,46 @@ public sealed class FileRecordStore(IDbContextFactory<AppDbContext> factory)
     }
 
     /// <summary>某个路径的全部版本（文件历史）。设计文档 06 §4.3。</summary>
+    /// <remarks>
+    /// **必须对 <paramref name="chainSnapshotIds"/> 分块。** 调用方
+    /// （<c>MirrorQueryService.GetFileHistoryAsync</c>）传进来的是"该任务**全部**已完成快照的 id"，
+    /// 它随快照数单调增长；而 EF 会把 <c>Contains</c> 的集合**逐元素内联成 SQL 参数**
+    /// （实测：10 个元素 → 899 字符，5000 个元素 → 307045 字符，见
+    /// <c>SqlParameterizationTests</c>）。一旦超过 SQLite 的 32766 个参数上限，
+    /// 这个端点会以 <c>too many SQL variables</c> **直接失败**，而不是变慢——
+    /// 长期开着实时监控的任务（每 30 次增量一次全量）迟早会走到这一步。
+    /// 同文件其它方法（<see cref="GetRecordsByPathKeysAsync"/> 等）本来就在分块，只有这里漏了。
+    /// </remarks>
     public async Task<List<BackupFile>> GetFileHistoryAsync(
         Guid taskId,
         string relativePathKey,
         IReadOnlyList<int> chainSnapshotIds,
         CancellationToken ct)
     {
+        var result = new List<BackupFile>();
+        if (chainSnapshotIds.Count == 0)
+        {
+            return result;
+        }
+
         await using AppDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        return await db.Files
-            .Where(f => f.TaskId == taskId
-                        && f.RelativePathKey == relativePathKey
-                        && chainSnapshotIds.Contains(f.SnapshotId)
-                        && !f.IsDeleted)
-            .OrderBy(f => f.SnapshotId)
-            .ToListAsync(ct)
-            .ConfigureAwait(false);
+
+        // 逐块查、顺序追加即得全局升序：调用方传的 id 是升序的（GetCompletedAsync 按 Id 排序），
+        // 每块内部又 OrderBy(SnapshotId)，所以追加结果与"不分块一次查完"的顺序一致。
+        foreach (int[] chunk in chainSnapshotIds.Chunk(ChunkSize))
+        {
+            List<BackupFile> rows = await db.Files
+                .Where(f => f.TaskId == taskId
+                            && f.RelativePathKey == relativePathKey
+                            && chunk.Contains(f.SnapshotId)
+                            && !f.IsDeleted)
+                .OrderBy(f => f.SnapshotId)
+                .ToListAsync(ct)
+                .ConfigureAwait(false);
+            result.AddRange(rows);
+        }
+
+        return result;
     }
 
     /// <summary>按路径精确取某个快照镜像里的记录（还原用）。</summary>

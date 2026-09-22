@@ -65,6 +65,8 @@ public sealed class RestoreService(
         int unavailable = 0;
         long plannedBytes = 0;
         var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // 跨条目共享的"已确认没有重解析点"的目录集合（见 FindReparsePoint）
+        var okDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         await foreach (MirrorItem item in StreamTargetsAsync(request, ct).ConfigureAwait(false))
         {
@@ -74,13 +76,20 @@ public sealed class RestoreService(
             string targetPath = _normalizer.Combine(request.TargetRoot, item.Path);
             bool targetExists = _fs.FileExists(targetPath);
             PlannedAction action = ResolveAction(
-                item, targetPath, PolicyFor(request, item.Path), usedNames, blobStore);
+                item, targetPath, request.TargetRoot, PolicyFor(request, item.Path),
+                usedNames, okDirectories, blobStore);
 
             switch (action.Action)
             {
                 case RestorePlanAction.Restore:
                     planned++;
                     plannedBytes += item.Length;
+                    // **必须像 ExecuteAsync 那样登记已占用的目标名**（见 :163）。
+                    // KeepBoth 生成的"a (1).txt"本身也要占住这个名字，否则同一批里
+                    // 两个本该分别落到 a (1).txt 与 a (2).txt 的条目会算出**同一个**新名字——
+                    // 计划界面显示"将写入 2 个文件、无冲突"，执行时却按已登记的名字改判，
+                    // 用户确认过的落点和实际落盘不一致。预演不可信比没有预演更糟。
+                    usedNames.Add(action.FinalTargetPath ?? targetPath);
                     break;
                 case RestorePlanAction.SkipByConflict:
                     conflicts++;
@@ -128,6 +137,9 @@ public sealed class RestoreService(
         long bytes = 0;
         var failures = new List<RestoreFailure>();
         var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // 跨条目共享的"已确认没有重解析点"的目录集合（见 FindReparsePoint）。
+        // 执行时**重新**建一个：计划可能生成于很久以前，那时的目录状态不能作为依据。
+        var okDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         int processed = 0;
         int total = plan.TotalCount > 0 ? plan.TotalCount : 0;
@@ -142,7 +154,8 @@ public sealed class RestoreService(
             try
             {
                 PlannedAction action = ResolveAction(
-                    item, targetPath, PolicyFor(request, item.Path), usedNames, blobStore);
+                    item, targetPath, request.TargetRoot, PolicyFor(request, item.Path),
+                    usedNames, okDirectories, blobStore);
                 switch (action.Action)
                 {
                     case RestorePlanAction.Unavailable:
@@ -200,6 +213,18 @@ public sealed class RestoreService(
             throw new InvalidOperationException("快照不属于该任务。");
         }
 
+        // 只有 Completed 的快照有合法镜像（02 §2.2：**查询一律只看 Status == Completed**）。
+        //
+        // 不拦这一下的话，`ResolveChainAsync` 会**静默回退到该快照之前的最后一个 Completed 快照**
+        // ——于是"还原快照 #N"实际写下去的是快照 #M 的内容，而用户是照着 #N 的预演结果点的确认。
+        // 浏览一个已作废的快照时给出上一个镜像是有意的取舍（EngineTests 有断言守着），
+        // 但还原是**写文件**操作，写错时间点是不可逆的，所以这里必须明确拒绝而不是沿用回退。
+        if (snapshot.Status != SnapshotStatus.Completed)
+        {
+            throw new InvalidOperationException(
+                $"快照 #{request.SnapshotId} 的状态是 {snapshot.Status}，没有可还原的镜像。请选择已完成的快照。");
+        }
+
         BackupTask task = await _tasks.GetAsync(request.TaskId, ct).ConfigureAwait(false)
                           ?? throw new InvalidOperationException($"找不到任务 {request.TaskId}");
 
@@ -215,6 +240,24 @@ public sealed class RestoreService(
         if (chain is null || chain.Count == 0)
         {
             throw new InvalidOperationException("该快照的镜像链断裂，无法还原。");
+        }
+
+        // **规模上限。** 镜像物化把"选中的文件"写成一组 OR 前缀，每个前缀占 **2 个 SQL 参数**
+        // （`LIKE $likeN` 与 `= $eqN`），再加上链上的快照 id（每个 1 个），全部内联进同一条 SQL。
+        // SQLite 的参数上限是 32766 —— 超过它**不是变慢，是 `too many sql variables` 直接失败**，
+        // 而这条路径同时服务预演与执行，也就是整个还原功能在"勾选很多文件"时 100% 不可用
+        // （而且是**数据恢复**路径）。
+        //
+        // 预算**按实际链长算**，不写常数：链长是被强制夹住的（`DecideNextTypeAsync` 在增量数
+        // 超过 `MaxAutoIncrementBackupCount` 时转全量，界面把该值夹到 ≤ 10000），所以
+        // "链长只有几百"是**假设**而不是约束 —— 拿它去算一个常数会在链很长时依然越界。
+        const int SqliteParameterLimit = 32766;
+        int pathBudget = (SqliteParameterLimit - chain.Count - 2) / 2;
+        if (request.RelativePaths.Count > pathBudget)
+        {
+            throw new InvalidOperationException(
+                $"一次最多还原 {pathBudget} 个选中的文件（当前 {request.RelativePaths.Count} 个）。"
+                + "请改用「整个快照」或「该目录及其子目录」作为范围。");
         }
 
         return (task, _blobStores.Create(task.BackupDir));
@@ -301,6 +344,72 @@ public sealed class RestoreService(
     }
 
     /// <summary>
+    /// 找出目标路径上第一个**重解析点**（符号链接 / junction）：目标文件自身，或它各级已存在的祖先目录。
+    /// 没有则返回 <c>null</c>。
+    /// </summary>
+    /// <remarks>
+    /// 为什么必须有这一道：白名单校验是纯字符串比较，而**写操作会跟随重解析点**。
+    /// 白名单根里只要有一个目录 junction，或目标位置上已经有一个文件符号链接，
+    /// 还原就会写到白名单之外。这是"任意文件写入"，05 §1.1 把它列在头号后果。
+    /// <para>
+    /// 只查**已存在**的段：不存在的中间目录是我们自己创建的，新建的目录不会是重解析点，
+    /// 所以从目标文件往上查到第一个不存在的目录即可停止（根一定存在，循环会在根处收口）。
+    /// </para>
+    /// <para>
+    /// <paramref name="okDirectories"/> 是跨条目共享的"已确认干净"目录集合。
+    /// 不加它的话，百万文件的整快照还原会做上百万次 <c>GetDirectory</c>；
+    /// 加上之后每个**目录**只查一次（同一目录下的文件共享结果），代价可以忽略。
+    /// </para>
+    /// </remarks>
+    private string? FindReparsePoint(string targetRoot, string targetPath, HashSet<string> okDirectories)
+    {
+        // 目标文件自身：已存在且是符号链接时，`FileMode.Create` 会截断它**指向的真实文件**
+        if (_fs.IsReparsePoint(targetPath))
+        {
+            return targetPath;
+        }
+
+        string? current = _normalizer.GetDirectoryName(targetPath);
+        var checkedNow = new List<string>();
+        string? hit = null;
+
+        while (current is not null
+               && !okDirectories.Contains(current)
+               && _normalizer.IsSameOrUnder(current, targetRoot))
+        {
+            checkedNow.Add(current);
+
+            // **探针必须与"存在性"解耦。** 实测（.NET 10 / Windows 10）：指向不存在目标的
+            // **目录**链接在 `Directory.Exists` / `DirectoryInfo.Exists` 眼里是"不存在"
+            // （所以 `GetDirectory` 返回 null），但它**仍然**是重解析点，
+            // `Directory.CreateDirectory` 与 `FileMode.Create` 都会跟随它 ——
+            // 于是"在白名单根里预先摆一个悬空的目录链接"照样能把写入引到白名单之外。
+            // （悬空的**文件**链接没有这个问题：`FileInfo.Exists` 对它返回 true，属性里也带 ReparsePoint。）
+            if (_fs.IsReparsePoint(current))
+            {
+                hit = current;
+                break;
+            }
+
+            if (_normalizer.AreEqual(current, targetRoot))
+            {
+                break;
+            }
+
+            current = _normalizer.GetDirectoryName(current);
+        }
+
+        if (hit is null)
+        {
+            // 只有整条链都干净才登记：中途命中的话，中间那些段本身**是**干净的、
+            // 但把它们记成"已确认"也没问题（命中点是更上面的那个），所以这里不登记更保守。
+            okDirectories.UnionWith(checkedNow);
+        }
+
+        return hit;
+    }
+
+    /// <summary>
     /// 决定这个条目的拟定动作。
     /// </summary>
     /// <remarks>
@@ -315,8 +424,10 @@ public sealed class RestoreService(
     private PlannedAction ResolveAction(
         MirrorItem item,
         string targetPath,
+        string targetRoot,
         RestoreConflictPolicy policy,
         HashSet<string> usedNames,
+        HashSet<string> okDirectories,
         PhysicalBlobStore blobStore)
     {
         if (string.IsNullOrEmpty(item.ContentHash))
@@ -330,6 +441,18 @@ public sealed class RestoreService(
             // 既不在池中也不在回收站 → 物理丢失，还原必然失败
             return new PlannedAction(RestorePlanAction.Unavailable, null,
                 "该文件不存在实际备份文件，可能是文件丢失");
+        }
+
+        // **写路径上的重解析点校验。** 白名单校验（`IsWithinAllowedRoots`）是**纯字符串比较**，
+        // 而 `Directory.CreateDirectory` 与 `FileMode.Create` 都会**跟随**重解析点：
+        // 白名单根里只要有一个目录 junction、或目标位置上已有一个文件符号链接，
+        // 写入就会落到白名单之外（`C:\Windows\System32`、服务启动目录、或任何服务账号
+        // 可写的位置）。05 §1.1 把"任意文件写入"列在头号后果、白名单是头号缓解手段，
+        // 而这道防线原来只落在**读**路径上（`FsController` 判最后一段）。
+        if (FindReparsePoint(targetRoot, targetPath, okDirectories) is { } reparse)
+        {
+            return new PlannedAction(RestorePlanAction.Unavailable, null,
+                $"目标路径上有重解析点（符号链接/junction），拒绝写入以免落到白名单之外：{reparse}");
         }
 
         if (!_fs.FileExists(targetPath))

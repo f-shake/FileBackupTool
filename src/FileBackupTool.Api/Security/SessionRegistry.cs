@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FileBackupTool.Api.Contracts;
 using FileBackupTool.Api.Infrastructure;
 using FileBackupTool.Core.Abstractions;
 
@@ -110,18 +111,37 @@ public sealed class SessionRegistry(
         }
     }
 
-    public SessionRecord? Get(string? sessionId) =>
-        sessionId is not null && _sessions.TryGetValue(sessionId, out SessionRecord? record) ? record : null;
+    public SessionRecord? Get(string? sessionId)
+    {
+        if (sessionId is null)
+        {
+            return null;
+        }
+
+        // **读路径也必须持锁。** `_sessions` 是普通 `Dictionary`，而写路径在 `lock (_sync)` 里
+        // Add / Remove（容量增长时会替换整个桶数组）。一边 `TryGetValue` 一边扩容是
+        // **未定义行为**：轻则读到过期视图（刚被踢出的会话仍判有效、刚创建的会话判无效），
+        // 重则抛 `IndexOutOfRangeException`，而这句代码在每个受认证请求上都会执行。
+        lock (_sync)
+        {
+            return _sessions.TryGetValue(sessionId, out SessionRecord? record) ? record : null;
+        }
+    }
 
     /// <summary>该会话是否仍然有效。未加载完成时返回 true（见 <see cref="Loaded"/> 的说明）。</summary>
     public bool IsValid(string? sessionId)
     {
-        if (!Loaded)
+        // `Loaded` 的读取也一并放进锁里：它在 LoadAsync 里与 `_sessions` 一同赋值（同为锁内），
+        // 分开读会出现"Loaded 已为 true 而表还是旧的"这种撕裂读。
+        lock (_sync)
         {
-            return true;
-        }
+            if (!Loaded)
+            {
+                return true;
+            }
 
-        return sessionId is not null && _sessions.ContainsKey(sessionId);
+            return sessionId is not null && _sessions.ContainsKey(sessionId);
+        }
     }
 
     public async Task<SessionRecord> CreateAsync(
@@ -200,7 +220,8 @@ public sealed class SessionRegistry(
 
         if (removed)
         {
-            await PersistAsync(ct).ConfigureAwait(false);
+            // 管理员踢出单个会话：安全相关，落库失败必须让接口报错而不是假装成功。
+            await PersistAsync(ct, required: true).ConfigureAwait(false);
         }
 
         return removed;
@@ -230,7 +251,8 @@ public sealed class SessionRegistry(
 
         if (count > 0)
         {
-            await PersistAsync(ct).ConfigureAwait(false);
+            // 踢出该用户的**全部**会话（改密码、重绑后的兜底）：同样是安全相关。
+            await PersistAsync(ct, required: true).ConfigureAwait(false);
         }
 
         return count;
@@ -256,7 +278,20 @@ public sealed class SessionRegistry(
         return removed;
     }
 
-    private async Task PersistAsync(CancellationToken ct)
+    /// <summary>
+    /// 把内存里的登记表落库。
+    /// </summary>
+    /// <param name="required">
+    /// <c>true</c> = 这是**安全相关**的变更（管理员踢出会话），落库失败必须让调用方知道；
+    /// <c>false</c> = 心跳 / 创建这类变更，落库失败只记一条告警（下一次写入会补上）。
+    /// </param>
+    /// <remarks>
+    /// **为什么踢出必须区分出来**：内存里删掉、库里还在时，接口返回 204、审计写下"已踢出"，
+    /// 管理员认为处置完了；而服务**重启**（升级、崩溃、迁移）后 <c>LoadAsync</c> 会把库里那条记录
+    /// 原样读回来——**被踢掉的会话直接复活**，界面上还显示为"尚未被踢"，没有任何信号提示要再踢一次。
+    /// 一次已经处置过的入侵静默恢复，比一次明确的报错严重得多。
+    /// </remarks>
+    private async Task PersistAsync(CancellationToken ct, bool required = false)
     {
         SessionRecord[] snapshot;
         lock (_sync)
@@ -273,6 +308,21 @@ public sealed class SessionRegistry(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (required)
+            {
+                _logger.LogError(ex, "会话登记表写入失败（安全相关变更），本次踢出无法持久化。");
+
+                // 用**专门的 code**：调用方必须能区分"**已经生效**但没持久化"与"没生效"。
+                // 踢出本身确实已经生效——内存里删掉了，那个 Cookie 立刻失效；
+                // 失败的只是"它活不过重启"。含糊地报一句 409 会让用户以为没踢掉而反复重试，
+                // 或者以为处理完了而不再复核。
+                throw ApiException.Conflict(
+                    ApiErrorCodes.SessionPersistFailed,
+                    "会话已在内存中撤销（该会话立即失效），但会话登记表落库失败——"
+                    + "服务重启后它可能恢复。请排查数据库后到会话列表里复核。",
+                    "SessionRegistry.PersistAsync 写入会话登记表失败。");
+            }
+
             // 落库失败不能让登录失败；内存里仍然是准的，下一次写入会补上。
             _logger.LogWarning(ex, "会话登记表写入失败，本次变更仅存在于内存中。");
         }

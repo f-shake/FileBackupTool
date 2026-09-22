@@ -45,6 +45,15 @@ public static class ApiErrorCodes
     public const string SessionNotFound = "SESSION_NOT_FOUND";
     public const string SessionRevoked = "SESSION_REVOKED";
 
+    /// <summary>
+    /// 会话登记表**落库失败**——踢出已经在内存里生效，但它不会活过重启。
+    /// </summary>
+    /// <remarks>
+    /// 需要与普通冲突分开：调用方据此告诉用户"变更**已经发生**，只是没持久化"。
+    /// 用一句含糊的 409 会让用户以为没踢掉，从而反复重试或以为处理完了。
+    /// </remarks>
+    public const string SessionPersistFailed = "SESSION_PERSIST_FAILED";
+
     // ---- 任务 / 目录 ----
     public const string TaskNotFound = "TASK_NOT_FOUND";
     public const string TaskDirConflict = "TASK_DIR_CONFLICT";

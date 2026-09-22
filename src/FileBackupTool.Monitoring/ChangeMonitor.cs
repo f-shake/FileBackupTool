@@ -127,6 +127,14 @@ public sealed class ChangeMonitor : IChangeMonitor, IDisposable
 
         lock (_gate)
         {
+            if (_disposed)
+            {
+                // `Dispose()` 已经跑过。此时再建 RootMonitor 会得到一个**无人释放**的 watcher：
+                // 它的事件队列已经被 Complete，投递静默失败，但文件系统句柄一直握着。
+                // 停机窗口里设置页/任务页的刷新正好会触发这条路径。
+                return;
+            }
+
             var wanted = new HashSet<Guid>(desired.Select(r => r.TaskId));
 
             foreach (Guid taskId in _roots.Keys.Where(id => !wanted.Contains(id)).ToList())
@@ -241,7 +249,25 @@ public sealed class ChangeMonitor : IChangeMonitor, IDisposable
     /// </remarks>
     public async Task PumpAsync(CancellationToken ct)
     {
-        await _pumpLock.WaitAsync(ct).ConfigureAwait(false);
+        // 停机窗口：`Dispose()` 会 `_pumpLock.Dispose()`，而此刻可能正有一个 HTTP 请求线程
+        // 走到这里（`RequestScanAsync` 用的是 `HttpContext.RequestAborted`）。
+        // 对已释放的 SemaphoreSlim 调 WaitAsync / Release 都会抛 ObjectDisposedException，
+        // 而且是从一个**正常请求**的路径里冒出来。
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            await _pumpLock.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // 与上一步之间被 Dispose 抢了——当作停机处理，不做任何事。
+            return;
+        }
+
         try
         {
             RootMonitor[] roots;
@@ -265,7 +291,15 @@ public sealed class ChangeMonitor : IChangeMonitor, IDisposable
         }
         finally
         {
-            _pumpLock.Release();
+            try
+            {
+                _pumpLock.Release();
+            }
+            catch (ObjectDisposedException)
+            {
+                // `Dispose()` 在 WaitAsync 之后、Release 之前跑完了。停机时这不是错误，
+                // 只是没有锁可还——吞掉，别让它从一个请求路径里抛出去。
+            }
         }
     }
 

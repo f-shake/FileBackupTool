@@ -82,11 +82,16 @@ public sealed class JobQueue(
         logger.LogInformation("作业 {Id} 入队：{Description}（前面还有 {Ahead} 个）",
             entry.Id, request.Description, QueuedCount - 1);
 
+        // `position` 用 **1 基**，与 REST（`GET /api/jobs`：`JobDtos` 注释写"1 表示下一个执行"）
+        // 以及前端（`e.position > 0` → 提示"前面还有 position-1 个作业"）一致。
+        // `PositionOf` 返回的是"前面有多少个 Queued"，是 0 基，所以这里 +1。
+        // 原来直接把 0 基值发出去，第一个排队作业的位置是 0 —— 前端那句 `> 0` 判定不成立，
+        // 用户**看不到任何"已排队"提示**；第二个作业则显示"前面还有 0 个"。
         _ = events.PublishAsync("job.queued", new
         {
             jobId = entry.Id,
             type = request.Type.ToString(),
-            position = PositionOf(entry.Id),
+            position = PositionOf(entry.Id) + 1,
             description = request.Description,
         }, CancellationToken.None);
 
@@ -117,23 +122,38 @@ public sealed class JobQueue(
             return Task.FromResult(false);
         }
 
-        switch (entry.Status)
+        // 状态迁移与 `Cancellation` 的读写全部与消费循环串行化（两边都用 `_gate`）。
+        // 不加锁会真实发生两种坏结果：
+        //  ① **"取消成功"但照跑**：消费循环可能已经读过 `Status`（判断要不要跳过）而还没写 `Running`，
+        //     此时这里置 `Aborted`、向用户返回 true、还发了 `job.aborted`；随后循环把 `Status`
+        //     覆盖回 `Running`，于是用户被告知已取消，磁盘却在被写几个小时。
+        //  ② **500 而不是取消**：循环收尾时把 `Cancellation` 置 null 并释放 CTS，
+        //     这里若在读到它之后才调 `Cancel()`，拿到的是**已释放**的 CTS →
+        //     `ObjectDisposedException` 从 HTTP 路径抛出（`CancelForTaskAsync` 的循环还会因此
+        //     中断整批取消）。把 `Cancel()` 放在锁内，是为了让"读到 CTS"与"释放 CTS"不可能交错；
+        //     取消回调不会回头抢这把锁，所以不存在死锁环。
+        lock (_gate)
         {
-            case JobStatus.Queued:
-                entry.Status = JobStatus.Aborted;
-                entry.Error = "已取消（尚未开始）";
-                entry.EndedAtUtc = clock.UtcNow;
-                _ = events.PublishAsync("job.aborted", new { jobId, reason = "已取消（尚未开始）" },
-                    CancellationToken.None);
-                return Task.FromResult(true);
+            switch (entry.Status)
+            {
+                case JobStatus.Queued:
+                    entry.Status = JobStatus.Aborted;
+                    entry.Error = "已取消（尚未开始）";
+                    entry.EndedAtUtc = clock.UtcNow;
+                    break;
 
-            case JobStatus.Running:
-                entry.Cancellation?.Cancel();
-                return Task.FromResult(true);
+                case JobStatus.Running:
+                    entry.Cancellation?.Cancel();
+                    return Task.FromResult(true);
 
-            default:
-                return Task.FromResult(false);
+                default:
+                    return Task.FromResult(false);
+            }
         }
+
+        // 发布放在锁外：`PublishAsync` 是异步的，不该在持锁时启动。
+        _ = TryPublishAsync("job.aborted", new { jobId, reason = "已取消（尚未开始）" }, entry);
+        return Task.FromResult(true);
     }
 
     public async Task<bool> CancelForTaskAsync(Guid taskId, CancellationToken ct)
@@ -176,45 +196,63 @@ public sealed class JobQueue(
         {
             await foreach (JobEntry entry in _channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                if (entry.Status == JobStatus.Aborted)
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+                lock (_gate)
                 {
-                    continue;
+                    if (entry.Status == JobStatus.Aborted)
+                    {
+                        // 已被 CancelAsync 判为"取消（尚未开始）"，那条路径已经发过 job.aborted
+                        continue;
+                    }
+
+                    entry.Cancellation = linked;
+                    entry.Status = JobStatus.Running;
+                    entry.StartedAtUtc = clock.UtcNow;
                 }
 
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                entry.Cancellation = linked;
-                entry.Status = JobStatus.Running;
-                entry.StartedAtUtc = clock.UtcNow;
-
                 logger.LogInformation("作业 {Id} 开始：{Description}", entry.Id, entry.Request.Description);
-                await events.PublishAsync("job.started", new
-                {
-                    jobId = entry.Id,
-                    type = entry.Request.Type.ToString(),
-                    taskId = entry.Request.TaskId,
-                }, CancellationToken.None).ConfigureAwait(false);
 
+                // **`job.started` 的发布必须在 try 里面。**
+                // 它原来在 try 之外，一旦抛出（OCE、或任何发布器实现抛出的异常）就会从
+                // `await foreach` 里直接逃出去——**唯一的消费循环就此永久死亡**，
+                // 而 `Status` 已置 `Running`、`Cancellation` 也在（上面那个 lock 里刚写），
+                // 于是 `IsBusy` 永远为 true：此后**所有**备份/还原都排不进来，
+                // 该作业永远"运行中"，用户点取消还会打到已释放的 CTS 上。
                 try
                 {
+                    await TryPublishAsync("job.started", new
+                    {
+                        jobId = entry.Id,
+                        type = entry.Request.Type.ToString(),
+                        taskId = entry.Request.TaskId,
+                    }, entry).ConfigureAwait(false);
+
                     await ExecuteAsync(entry, linked.Token).ConfigureAwait(false);
+
                     entry.Status = JobStatus.Completed;
                     entry.EndedAtUtc = clock.UtcNow;
 
-                    await events.PublishAsync("job.completed", new
+                    // 状态先定下来，再发布。顺序反过来（原来就是这样）会有一个很坏的后果：
+                    // `job.completed` 一旦抛异常就会落进下面的通用 catch，把一次**已经提交成功**的
+                    // 备份改写成 `Failed`——库里 Completed、界面 Failed，用户据此重跑一次全量备份，
+                    // 或去排查一个不存在的故障。`TryPublishAsync` 也不抛，双保险。
+                    await TryPublishAsync("job.completed", new
                     {
                         jobId = entry.Id,
                         result = entry.BackupResult ?? (object?)entry.RestoreResult ?? entry.GcResult
                                  ?? (object?)entry.IntegrityReport,
-                    }, CancellationToken.None).ConfigureAwait(false);
+                    }, entry).ConfigureAwait(false);
                 }
-                catch (OperationCanceledException) when (linked.IsCancellationRequested)
+                catch (OperationCanceledException) when (linked.IsCancellationRequested
+                                                         || entry.BackupResult?.Canceled == true)
                 {
                     entry.Status = JobStatus.Aborted;
                     entry.Error = "已取消";
                     entry.EndedAtUtc = clock.UtcNow;
 
-                    await events.PublishAsync("job.aborted", new { jobId = entry.Id, reason = "已取消" },
-                        CancellationToken.None).ConfigureAwait(false);
+                    await TryPublishAsync("job.aborted", new { jobId = entry.Id, reason = "已取消" }, entry)
+                        .ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -223,18 +261,53 @@ public sealed class JobQueue(
                     entry.EndedAtUtc = clock.UtcNow;
 
                     logger.LogError(ex, "作业 {Id} 失败。", entry.Id);
-                    await events.PublishAsync("job.failed", new { jobId = entry.Id, error = entry.Error },
-                        CancellationToken.None).ConfigureAwait(false);
+                    await TryPublishAsync("job.failed", new { jobId = entry.Id, error = entry.Error }, entry)
+                        .ConfigureAwait(false);
                 }
                 finally
                 {
-                    entry.Cancellation = null;
+                    // `Cancellation` 的置空与 CTS 的释放必须**在同一把锁内**完成：
+                    // 这样 `CancelAsync` 要么在释放前拿到活着的 CTS（在锁内调 `Cancel()`），
+                    // 要么看到 null 而什么都不做——不可能拿到已释放的实例。
+                    // `linked.Dispose()` 幂等，`using` 作用域结束时再调一次无副作用。
+                    lock (_gate)
+                    {
+                        entry.Cancellation = null;
+                        linked.Dispose();
+                    }
                 }
             }
         }
         catch (OperationCanceledException)
         {
             // 宿主关闭
+        }
+    }
+
+    /// <summary>
+    /// 发布一个作业事件，**永不抛出**。
+    /// </summary>
+    /// <remarks>
+    /// 发布失败绝不能影响作业本身或消费循环，两种坏结果都已经真实存在过：
+    /// <list type="bullet">
+    /// <item>让异常在 <c>RunLoopAsync</c> 的 <c>await foreach</c> 里逃出去，会**永久杀死唯一的
+    /// 消费循环**（<c>IsBusy</c> 停在 true，此后所有作业都排不进来）；</item>
+    /// <item>让 <c>job.completed</c> 的失败落进通用 catch，会把一次**已经提交成功**的备份
+    /// 改写成 <c>Failed</c>——库里 Completed、界面 Failed。</item>
+    /// </list>
+    /// 这两种都是把"实时通道不通"升级成"数据面坏掉"，代价远大于丢一条通知。
+    /// 所以这里一律降级为 Warning：前端本来就有 REST 兜底（<c>GET /api/jobs</c> 与
+    /// 重连后的全量重取），少一条推送不影响正确性。
+    /// </remarks>
+    private async Task TryPublishAsync(string eventName, object payload, JobEntry entry)
+    {
+        try
+        {
+            await events.PublishAsync(eventName, payload, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "发布作业事件 {Event}（作业 {Id}）失败，已忽略。", eventName, entry.Id);
         }
     }
 
@@ -249,6 +322,27 @@ public sealed class JobQueue(
                 entry.BackupResult = await backup.RunAsync(
                     request.TaskId!.Value, request.BackupType, request.DirtyScopes, progress, ct)
                     .ConfigureAwait(false);
+
+                // **不能只看"有没有抛异常"。** 引擎把用户取消吞掉了：它把快照置为 Aborted 后
+                // 返回一个普通结果（09 B6 要求如此，好让"快照已作废"这个事实落库）。
+                // 不看这两个分支的话：用户点了取消，快照列表显示"已作废"，
+                // 而 `GET /api/jobs` 与事件流都显示这个作业 **Completed**——
+                // 只有 SignalR 负载里的 success:false 能看出问题，任谁去查都会先怀疑快照那边。
+                if (entry.BackupResult.Canceled)
+                {
+                    // 抛 OCE 让下面 `when (linked.IsCancellationRequested)` 的分支接住，
+                    // 作业于是被正确标成 Aborted 并发出 job.aborted。
+                    throw new OperationCanceledException("已取消");
+                }
+
+                if (entry.BackupResult.Status == SnapshotStatus.Aborted)
+                {
+                    // 非取消的中止（失败率超阈值 / 连续失败 / 异常）应当体现为**失败**，
+                    // 并带上真正的原因，而不是一个语焉不详的 Completed。
+                    throw new InvalidOperationException(
+                        entry.BackupResult.AbortReason ?? "备份被中止。");
+                }
+
                 break;
 
             case JobType.Restore:

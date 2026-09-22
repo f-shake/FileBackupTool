@@ -315,7 +315,26 @@ internal sealed class RootMonitor : IDisposable
                 _root.TaskName, effective.Reason,
                 effective.Kind == ScanKind.Full ? "全量" : string.Join("、", effective.Scopes));
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            // 取消也必须回滚。走到这里说明 `TakeReady` 已经把脏目录从 `_scheduled`/`_pending`
+            // 摘走放进了 `_inFlight`，而投递没做完——最常见的触发是**手动扫描时用户关掉标签页/
+            // 导航离开**（`ct` 就是 `HttpContext.RequestAborted`），宿主停机同理。
+            //
+            // 原来的过滤器是 `when (ex is not OperationCanceledException)`，恰好把这条路径排除在外，
+            // 而那时候下面那句注释写的正是"投递失败不能把脏目录弄丢"——语义与实现相反。
+            // 不回滚的后果是静默的：这批"磁盘上确实变了"的目录永久消失，要等这些文件再次被改、
+            // 或等到 6 小时兜底全量扫描、甚至下次重启才可能被覆盖到。
+            _coalescer.Rollback(_clock.UtcNow);
+            _logger.LogInformation(
+                "源「{Task}」排程扫描被取消（{Reason}），脏目录已回滚，将在下个节拍重试。",
+                _root.TaskName, effective.Reason);
+
+            // 回滚完照原样抛出：调用方（宿主停机 / 那个被中止的请求）应当知道发生了取消，
+            // 不能被这里吞掉。
+            throw;
+        }
+        catch (Exception ex)
         {
             // 投递失败不能把脏目录弄丢：它们代表"磁盘上确实变了"这个事实。
             _coalescer.Rollback(_clock.UtcNow);

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using FileBackupTool.Api.Contracts;
 using FileBackupTool.Api.Infrastructure;
+using FileBackupTool.Core.Abstractions;
 using FileBackupTool.Core.Configuration;
 using FileBackupTool.Core.Enums;
 using Microsoft.AspNetCore.Authentication;
@@ -35,11 +36,13 @@ public sealed class SessionValidationEvents(
     SessionRegistry sessions,
     AuditLogger audit,
     IOptions<SecurityOptions> securityOptions,
+    IClock clock,
     ILogger<SessionValidationEvents> logger) : CookieAuthenticationEvents
 {
     private readonly SessionRegistry _sessions = sessions;
     private readonly AuditLogger _audit = audit;
     private readonly SecurityOptions _security = securityOptions.Value;
+    private readonly IClock _clock = clock;
     private readonly ILogger<SessionValidationEvents> _logger = logger;
 
     public override async Task ValidatePrincipal(CookieValidatePrincipalContext context)
@@ -64,7 +67,12 @@ public sealed class SessionValidationEvents(
         SessionRecord? record = _sessions.Get(sessionId);
         if (record is not null)
         {
-            TimeSpan lifetime = DateTime.UtcNow - record.CreatedAtUtc;
+            // 用 `_clock` 而不是 `DateTime.UtcNow`：`record.CreatedAtUtc` 来自 `IClock`
+            // （`SessionRegistry.CreateAsync`），这里混用真实墙上时钟就违反了"所有 DateTime 走 IClock"
+            // 的契约。生产环境两者恰好相等所以看不出问题，但测试注入假时钟时是**硬故障**：
+            // 时钟冻结在过去 → `DateTime.UtcNow - CreatedAtUtc` 得到"几十年" →
+            // **每个会话都被判为超过绝对有效期**，全部被强踢，与本条规则的意图正好相反。
+            TimeSpan lifetime = _clock.UtcNow - record.CreatedAtUtc;
             if (lifetime > TimeSpan.FromDays(_security.CookieAbsoluteDays))
             {
                 _logger.LogInformation(

@@ -122,11 +122,23 @@ export class RealtimeClient {
     this.setState('idle')
   }
 
+  /**
+   * 连接循环是否正在跑（单飞闸）。见 `connectLoop` 的说明——
+   * 两个循环抢同一个 connection 的 `start()`，正是"点了恢复实时反而退回轮询"的成因。
+   */
+  private connectLoopActive = false
+
   /** 手动重试：从轮询模式尝试恢复到实时通道。 */
   async retryNow(): Promise<void> {
     if (this.disposed) return
     this.stopPolling()
     this.consecutiveFailures = 0
+
+    // 已经有一个循环在重连（很可能正睡在退避 delay 里）：**不要另起一个**。
+    // 该做的已经做了（停轮询、清零失败计数），而上面 `stop()` 触发的 `onclose`
+    // 会让那个循环继续推进。这里再起一个就回到"两个循环抢 start()"的老问题。
+    if (this.connectLoopActive) return
+
     if (!this.connection) {
       this.connection = this.buildConnection()
       this.registerServerHandlers(this.connection)
@@ -237,43 +249,62 @@ export class RealtimeClient {
    * 连续 `MAX_CONSECUTIVE_FAILURES` 次失败即降级为轮询（07 §6）。
    */
   private async connectLoop(): Promise<void> {
-    while (!this.disposed) {
-      const conn = this.connection
-      if (!conn) return
+    // **单飞**：同一时刻只允许一个循环碰 `this.connection`。
+    //
+    // 不加这道闸，`retryNow`（顶栏"恢复实时"）会制造两个并发循环：它先 `stop()`，
+    // 而 stop 会触发 `onclose` → `void this.connectLoop()` 起一个循环；紧接着它自己
+    // 又 `await this.connectLoop()` 起第二个。两者共享同一个 connection 与同一个
+    // `consecutiveFailures`，于是第二个 `start()` 抛
+    // "Cannot start a HubConnection that is not in the 'Disconnected' state"，
+    // 把计数推上去——恰好在计数已达 2 时，用户**刚点完"恢复实时"就被判成第 3 次失败、
+    // 直接退回轮询**，表现为"点了没反应，状态还写着轮询"。
+    if (this.connectLoopActive) return
+    this.connectLoopActive = true
 
-      if (conn.state === HubConnectionState.Connected) {
-        this.consecutiveFailures = 0
-        this.setState('realtime')
-        this.lastConnectedAt = new Date().toISOString()
-        this.emitResync(this.everConnected ? 'reconnected' : 'connected')
-        this.everConnected = true
-        await this.resubscribeAll()
-        return
-      }
+    try {
+      while (!this.disposed) {
+        const conn = this.connection
+        if (!conn) return
 
-      this.setState('connecting')
-      try {
-        await conn.start()
-        this.consecutiveFailures = 0
-        this.lastError = null
-        this.setState('realtime')
-        this.lastConnectedAt = new Date().toISOString()
-        this.emitResync(this.everConnected ? 'reconnected' : 'connected')
-        this.everConnected = true
-        await this.resubscribeAll()
-        return
-      } catch (err) {
-        this.consecutiveFailures += 1
-        this.lastError = err instanceof Error ? err.message : String(err)
-
-        if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          // 降级：SignalR 完全不可用（代理配置错误、WebSocket 被阻断）
-          this.startPolling()
+        if (conn.state === HubConnectionState.Connected) {
+          this.consecutiveFailures = 0
+          // `lastConnectedAt` 必须在 `setState` **之前**赋值：`setState` 会同步通知监听者，
+          // 而通知读的是 `snapshot()`——先通知后赋值的话，ChannelBadge 的"最近连接"
+          // 永远显示的是**上一次**的连接时间（或首次为空）。
+          this.lastConnectedAt = new Date().toISOString()
+          this.setState('realtime')
+          this.emitResync(this.everConnected ? 'reconnected' : 'connected')
+          this.everConnected = true
+          await this.resubscribeAll()
           return
         }
-        // 退避后重试：1s → 2s
-        await delay(1000 * this.consecutiveFailures)
+
+        this.setState('connecting')
+        try {
+          await conn.start()
+          this.consecutiveFailures = 0
+          this.lastError = null
+          this.lastConnectedAt = new Date().toISOString()
+          this.setState('realtime')
+          this.emitResync(this.everConnected ? 'reconnected' : 'connected')
+          this.everConnected = true
+          await this.resubscribeAll()
+          return
+        } catch (err) {
+          this.consecutiveFailures += 1
+          this.lastError = err instanceof Error ? err.message : String(err)
+
+          if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            // 降级：SignalR 完全不可用（代理配置错误、WebSocket 被阻断）
+            this.startPolling()
+            return
+          }
+          // 退避后重试：1s → 2s
+          await delay(1000 * this.consecutiveFailures)
+        }
       }
+    } finally {
+      this.connectLoopActive = false
     }
   }
 

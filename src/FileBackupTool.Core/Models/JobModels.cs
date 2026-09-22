@@ -58,6 +58,18 @@ public sealed record BackupRunResult(
 {
     /// <summary>是否有文件未能备份。UI 必须据此显示"完成，但 N 个文件未备份"。</summary>
     public bool HasFailures => FailedFileCount > 0;
+
+    /// <summary>
+    /// 这次备份是否**因用户取消**而作废。
+    /// </summary>
+    /// <remarks>
+    /// 引擎把取消**吞掉**了：<c>RunAsync</c> 把快照正确置为 <c>Aborted</c> 后返回一个**普通结果**
+    /// 而不抛异常（09 B6 要求如此，好让"快照已作废"这个事实落库）。
+    /// 于是作业层不能只看"有没有抛异常"，需要一个显式标志把"用户取消"与
+    /// "因为失败率/连续失败/异常而中止"分开——否则用户点了取消，
+    /// <c>GET /api/jobs</c> 与事件流都会显示这个作业 **Completed**。
+    /// </remarks>
+    public bool Canceled { get; init; }
 }
 
 // ---------------------------------------------------------------------------

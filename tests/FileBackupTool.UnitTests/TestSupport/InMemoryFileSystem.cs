@@ -69,7 +69,7 @@ public sealed class InMemoryFileSystem(IPathNormalizer normalizer) : IFileSystem
     public void AddTextFile(string fullPath, string content, DateTime? fileTimeUtc = null) =>
         AddFile(fullPath, System.Text.Encoding.UTF8.GetBytes(content), fileTimeUtc);
 
-    public void AddDirectory(string fullPath)
+    public void AddDirectory(string fullPath, FileAttributes attributes = 0, bool dangling = false)
     {
         EnsureParentDirectories(fullPath);
         string key = Key(fullPath);
@@ -81,10 +81,26 @@ public sealed class InMemoryFileSystem(IPathNormalizer normalizer) : IFileSystem
                 IsDirectory = true,
                 Content = null,
                 FileTimeUtc = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
-                Attributes = 0,
+                Attributes = attributes,
+                Dangling = dangling,
             };
         }
     }
+
+    /// <summary>
+    /// 加一个**目录重解析点**（符号链接 / junction），用于还原的白名单逃逸测试。
+    /// </summary>
+    /// <param name="dangling">
+    /// <c>true</c>（默认）= 指向**不存在**的目标。这模拟的正是实测里最阴的那种情形：
+    /// <c>Directory.Exists</c> / <c>DirectoryInfo.Exists</c> 对它返回 <c>false</c>
+    /// （所以基于存在性的检查完全看不见它），但它**仍然**是重解析点，
+    /// <c>Directory.CreateDirectory</c> 与 <c>FileMode.Create</c> 都会跟随它。
+    /// </param>
+    /// <remarks>
+    /// 真实 Windows 上，**目录** junction 不需要管理员权限即可创建，所以这不是纯理论情形。
+    /// </remarks>
+    public void AddReparseDirectory(string fullPath, bool dangling = true) =>
+        AddDirectory(fullPath, FileAttributes.ReparsePoint, dangling);
 
     public string? ReadText(string fullPath) =>
         _nodes.TryGetValue(Key(fullPath), out Node? node) && node.Content is not null
@@ -104,7 +120,7 @@ public sealed class InMemoryFileSystem(IPathNormalizer normalizer) : IFileSystem
         _nodes.TryGetValue(Key(fullPath), out Node? node) && !node.IsDirectory;
 
     public bool DirectoryExists(string fullPath) =>
-        _nodes.TryGetValue(Key(fullPath), out Node? node) && node.IsDirectory;
+        _nodes.TryGetValue(Key(fullPath), out Node? node) && node.IsDirectory && !node.Dangling;
 
     public FileEntry? GetFile(string fullPath)
     {
@@ -118,13 +134,22 @@ public sealed class InMemoryFileSystem(IPathNormalizer normalizer) : IFileSystem
 
     public DirectoryEntry? GetDirectory(string fullPath)
     {
-        if (!_nodes.TryGetValue(Key(fullPath), out Node? node) || !node.IsDirectory)
+        // 悬空的重解析点目录在这里**装作不存在**——这正是真实 `DirectoryInfo.Exists` 的行为，
+        // 也正是调用方不能只靠存在性判定的原因（见 `IsReparsePoint`）。
+        if (!_nodes.TryGetValue(Key(fullPath), out Node? node) || !node.IsDirectory || node.Dangling)
         {
             return null;
         }
 
         return new DirectoryEntry(node.FullPath, node.FileTimeUtc, node.Attributes);
     }
+
+    /// <summary>
+    /// 是否重解析点。**只看节点自身的属性，与"是否存在"无关**（与 <c>PhysicalFileSystem</c> 一致）。
+    /// </summary>
+    public bool IsReparsePoint(string fullPath) =>
+        _nodes.TryGetValue(Key(fullPath), out Node? node)
+        && (node.Attributes & FileAttributes.ReparsePoint) != 0;
 
     public void CreateDirectory(string fullPath) => AddDirectory(fullPath);
 
@@ -373,6 +398,11 @@ public sealed class InMemoryFileSystem(IPathNormalizer normalizer) : IFileSystem
         public DateTime FileTimeUtc { get; set; }
 
         public FileAttributes Attributes { get; set; }
+
+        /// <summary>
+        /// 该重解析点的目标**不存在**（悬空）。用于模拟"存在性检查看不见它、但写操作会跟随它"。
+        /// </summary>
+        public bool Dangling { get; init; }
     }
 
     /// <summary>写入流：Dispose 时才把内容提交进文件表（模拟"写完才可见"）。</summary>

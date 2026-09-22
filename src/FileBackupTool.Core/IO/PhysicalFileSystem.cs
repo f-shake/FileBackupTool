@@ -44,10 +44,31 @@ public sealed class PhysicalFileSystem : IFileSystem, IDirectorySkipReporter
         }
     }
 
+    /// <summary>
+    /// 是否重解析点（符号链接 / junction），**不跟随**链接。
+    /// </summary>
+    /// <remarks>
+    /// 用 <c>File.GetAttributes</c>：它读的是**目录项自身**，因此对指向不存在目标的链接
+    /// 同样返回 <c>ReparsePoint</c>（实测确认，.NET 10 / Windows 10）。
+    /// 这正是它必须独立于 <c>Exists</c> 的原因——悬空的**目录**链接在
+    /// <c>DirectoryInfo.Exists</c> 眼里是"不存在"，但它会把写操作引到别处。
+    /// </remarks>
+    public bool IsReparsePoint(string fullPath)
+    {
+        try
+        {
+            return (File.GetAttributes(Extend(fullPath)) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception ex) when (IsBenign(ex))
+        {
+            // 确实不存在的路径会抛 FileNotFoundException —— 那本来就不是重解析点
+            return false;
+        }
+    }
+
     public DirectoryEntry? GetDirectory(string fullPath)
     {
-        string p = Extend(fullPath);
-        try
+        string p = Extend(fullPath);        try
         {
             var info = new DirectoryInfo(p);
             if (!info.Exists)
@@ -296,7 +317,8 @@ public sealed class PhysicalFileSystem : IFileSystem, IDirectorySkipReporter
                         // 但这件事必须让用户看得见——"不静默"是设计文档 03 §7 的立场。
                         if (reportSkipped)
                         {
-                            _skipped.Enqueue(new SkippedDirectory(full, "目录重解析点（符号链接/junction），未进入"));
+                            _skipped.Enqueue(new SkippedDirectory(
+                                full, "目录重解析点（符号链接/junction），未进入", Deliberate: true));
                         }
 
                         continue;
