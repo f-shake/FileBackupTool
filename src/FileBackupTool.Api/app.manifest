@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+
+  <assemblyIdentity version="1.0.0.0" name="FileBackupTool.Api.app" />
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings xmlns:ws2016="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <!--
+        设计文档 01 §6.1 的基线要求：源目录与还原目标都可能很深，必须声明 longPathAware。
+        注意：这只解决"进程允许长路径"，目标机器还必须设置注册表
+        LongPathsEnabled=1（部署文档要求）。两者缺一，超长路径依然抛 PathTooLongException。
+      -->
+      <ws2016:longPathAware>true</ws2016:longPathAware>
+    </windowsSettings>
+  </application>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- longPathAware 只在 Windows 10 / Server 2016 及以上被识别，必须有 supportedOS 声明。 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+</assembly>

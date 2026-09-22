@@ -1,0 +1,62 @@
+/**
+ * 06 §4.9 认证端点。
+ *
+ * 流程见 docs/plans/05-认证与安全.md：
+ *   登录 → 强制 TOTP 绑定（未绑定前不能访问任何业务功能）→ 保存恢复码
+ *   Cookie 载体（HttpOnly + Secure + SameSite=Strict），滑动 7 天 / 绝对 30 天
+ */
+import { del, get, post } from './http'
+import type {
+  ChangePasswordRequest,
+  CurrentUser,
+  LoginRequest,
+  LoginResult,
+  RecoveryCodesResult,
+  SessionInfo,
+  TotpSetupResult,
+} from './types'
+
+/** `POST /api/auth/login` —— 登录（限流 + 锁定） */
+export function login(body: LoginRequest): Promise<LoginResult> {
+  return post<LoginResult>('/auth/login', body)
+}
+
+/** `POST /api/auth/logout` —— 登出 */
+export function logout(): Promise<void> {
+  return post<void>('/auth/logout')
+}
+
+/** `GET /api/auth/me` —— 当前用户信息 */
+export function getCurrentUser(): Promise<CurrentUser> {
+  return get<CurrentUser>('/auth/me')
+}
+
+/** `POST /api/auth/totp/setup` —— 生成 TOTP 密钥与二维码 */
+export function setupTotp(): Promise<TotpSetupResult> {
+  return post<TotpSetupResult>('/auth/totp/setup')
+}
+
+/** `POST /api/auth/totp/confirm` —— 确认绑定（返回一次性恢复码） */
+export function confirmTotp(code: string): Promise<RecoveryCodesResult> {
+  return post<RecoveryCodesResult>('/auth/totp/confirm', { code })
+}
+
+/** `POST /api/auth/totp/recovery-codes` —— 重新生成恢复码 */
+export function regenerateRecoveryCodes(password: string): Promise<RecoveryCodesResult> {
+  return post<RecoveryCodesResult>('/auth/totp/recovery-codes', { password })
+}
+
+/** `POST /api/auth/password` —— 改密码（失效全部会话） */
+export function changePassword(body: ChangePasswordRequest): Promise<void> {
+  return post<void>('/auth/password', body)
+}
+
+/** `GET /api/auth/sessions` —— 会话列表 */
+export function listSessions(): Promise<SessionInfo[]> {
+  return get<SessionInfo[]>('/auth/sessions')
+}
+
+/** `DELETE /api/auth/sessions/{id}` —— 踢出某个会话 */
+export function revokeSession(id: string): Promise<void> {
+  return del<void>(`/auth/sessions/${encodeURIComponent(id)}`)
+}

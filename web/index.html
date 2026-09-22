@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>FileBackupTool 文件备份工具</title>
+    <script>
+      // 首屏防闪烁：在样式加载前先按系统偏好（或用户覆盖值）确定暗色类。
+      // 与 src/stores/theme.ts 的逻辑保持一致。
+      ;(function () {
+        try {
+          var override = localStorage.getItem('fbt.theme')
+          var prefersDark =
+            window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+          var dark = override === 'dark' || (override !== 'light' && prefersDark)
+          if (dark) document.documentElement.classList.add('dark')
+        } catch (e) {
+          /* 忽略 */
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,23 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+## 运行时数据（设计文档 02 §8）
+App_Data/
+publish/
+*.db
+*.db-wal
+*.db-shm
+
+## 前端
+web/node_modules/
+web/dist/
+src/FileBackupTool.Api/wwwroot/*
+!src/FileBackupTool.Api/wwwroot/.gitkeep
+
+## 测试临时目录
+.tmp-test/
+TestResults/

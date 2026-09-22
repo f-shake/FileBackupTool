@@ -1,0 +1,30 @@
+{
+  "name": "filebackuptool-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FileBackupTool 前端（Vue 3 + TypeScript + Vite + Element Plus）",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run type-check && vite build",
+    "build:only": "vite build",
+    "preview": "vite preview",
+    "type-check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "@microsoft/signalr": "^10.0.11",
+    "axios": "^1.20.0",
+    "element-plus": "^2.14.6",
+    "pinia": "^4.0.3",
+    "vue": "^3.5.43",
+    "vue-router": "^5.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.0",
+    "vue-tsc": "^3.3.11"
+  }
+}

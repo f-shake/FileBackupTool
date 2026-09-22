@@ -1,0 +1,181 @@
+/* ------------------------------------------------------------------ */
+/* 全局样式                                                            */
+/* ------------------------------------------------------------------ */
+
+:root {
+  --fbt-header-height: 56px;
+  --fbt-aside-width: 208px;
+  --fbt-mono: ui-monospace, 'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'Menlo', monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  background-color: var(--el-bg-color-page);
+  color: var(--el-text-color-primary);
+}
+
+/* 长路径与哈希用等宽字体，避免数字宽度跳动 */
+.fbt-mono {
+  font-family: var(--fbt-mono);
+  font-size: 0.92em;
+}
+
+/* 单行省略，配合 title 属性显示全路径（07 §7） */
+.fbt-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fbt-page {
+  padding: 16px 20px 32px;
+}
+
+.fbt-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.fbt-page-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.fbt-page-desc {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
+.fbt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fbt-spacer {
+  flex: 1 1 auto;
+}
+
+/* 统计尾巴：`共 N 项` / `共 N 个文件夹，M 个文件` */
+.fbt-footnote {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+/* 「成功但不完整」必须醒目 —— 非绿色的提示呈现（07 §7） */
+.fbt-warn-count {
+  color: var(--el-color-warning);
+  font-weight: 600;
+}
+
+.fbt-danger-count {
+  color: var(--el-color-danger);
+  font-weight: 600;
+}
+
+.fbt-muted {
+  color: var(--el-text-color-secondary);
+}
+
+.fbt-section {
+  margin-bottom: 16px;
+}
+
+.fbt-clickable-row {
+  cursor: pointer;
+}
+
+/* 三栏布局（快照文件浏览） */
+.fbt-three-pane {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr) 320px;
+  gap: 12px;
+  align-items: start;
+}
+
+@media (max-width: 1400px) {
+  .fbt-three-pane {
+    grid-template-columns: 210px minmax(0, 1fr) 280px;
+  }
+}
+
+@media (max-width: 1100px) {
+  .fbt-three-pane {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.fbt-pane {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background-color: var(--el-bg-color);
+  padding: 10px 12px;
+}
+
+.fbt-pane-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--el-text-color-regular);
+}
+
+/* 变更内容三列并排 */
+.fbt-change-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+@media (max-width: 1200px) {
+  .fbt-change-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 滚动区域 */
+.fbt-scroll-y {
+  overflow-y: auto;
+  max-height: 100%;
+}
+
+/* 深色模式下表格斑马纹对比度更可靠 */
+html.dark .el-table {
+  --el-table-tr-bg-color: var(--el-bg-color);
+}
+
+/* 让长内容在对话框里可滚动 */
+.fbt-pre {
+  font-family: var(--fbt-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background-color: var(--el-fill-color-light);
+  border-radius: 4px;
+  padding: 10px;
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+}

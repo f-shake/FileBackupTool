@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <RootNamespace>FileBackupTool.Api</RootNamespace>
+    <AssemblyName>FileBackupTool.Api</AssemblyName>
+    <UserSecretsId>filebackuptool-api</UserSecretsId>
+    <!--
+      长路径：设计文档 01 §6.1 的**基线**要求。
+      必须真正把 app.manifest 作为应用程序清单嵌入，否则 <ws2:longPathAware> 不会生效，
+      超长路径会在运行时抛 PathTooLongException（IOException 的子类）——
+      而它会被逐文件失败处理吞掉，变成"静默跳过"。这正是文档点名不可接受的行为。
+    -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 发布按框架依赖（非自包含）。设计文档 08 §4.1。 -->
+    <PublishSingleFile>false</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      前端构建产物（web/dist 的内容）拷进 wwwroot 后，由静态文件中间件 + SPA fallback 带起。
+      必须显式声明 CopyToOutputDirectory：Web SDK 只在 **publish** 时处理 wwwroot，
+      而开发期我们直接运行 bin 下的 dll（内容根就是输出目录），
+      不声明的话 wwwroot 不会被复制，表现是"接口都能用、界面 404 + 一条 WebRootPath 警告"。
+      用 Update 而不是 Include——Web SDK 已经隐式把 wwwroot\** 加为 Content，
+      再 Include 一次会触发 NETSDK1022 重复项错误。
+    -->
+    <Content Update="wwwroot\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+    <!--
+      显式引用 Identity 的 EF 存储：本层直接使用 AddEntityFrameworkStores / IdentityDbContext。
+      Data 层已传递引入，这里显式写出是为了让"本层依赖什么"一目了然。
+    -->
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FileBackupTool.Core\FileBackupTool.Core.csproj" />
+    <ProjectReference Include="..\FileBackupTool.Data\FileBackupTool.Data.csproj" />
+    <ProjectReference Include="..\FileBackupTool.Engine\FileBackupTool.Engine.csproj" />
+    <ProjectReference Include="..\FileBackupTool.Monitoring\FileBackupTool.Monitoring.csproj" />
+  </ItemGroup>
+
+</Project>

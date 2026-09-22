@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>FileBackupTool.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 决策 #1：仅复用 FzLib 的纯 .NET 部分（筛选规则语法）。
+         不使用 FileCopyHelper（WriteThrough，见 03 §3.5）与 FileHashHelper（只接受路径，无法流式）。 -->
+    <PackageReference Include="FzLib" Version="3.3.6" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
+  </ItemGroup>
+
+</Project>
