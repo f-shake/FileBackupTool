@@ -21,7 +21,6 @@ import type {
   QueuedJob,
   RootMonitorStatus,
 } from '@/api/types'
-import ChannelBadge from '@/components/ChannelBadge.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import JobProgressBar from '@/components/JobProgressBar.vue'
 import PathText from '@/components/PathText.vue'
@@ -125,7 +124,6 @@ function jobStateLabel(state: JobState): string {
       </div>
 
       <div class="fbt-toolbar">
-        <ChannelBadge />
         <el-button size="small" :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
       </div>
     </div>

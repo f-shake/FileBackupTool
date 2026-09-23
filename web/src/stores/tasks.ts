@@ -176,7 +176,13 @@ export const useTasksStore = defineStore('tasks', () => {
         notices.value = { ...notices.value, [taskId]: message }
         patchStatus(taskId, 'Ready')
       }
-      void refreshQuietly()
+      // 这里原先只调 `refreshQuietly()`（刷新 store 自己的 tasks → 只有列表页受益）。
+      // 但**任务详情页与快照面板不读 store 的 tasks**，它们只 watch `realtime.resyncTick`。
+      // 于是备份跑完后详情页一直停在「已排队 / 正在全量备份」、上一次备份结果为空、
+      // 快照列表也不出新行，「取消」按钮还一直可点——直到用户手按刷新，
+      // 或者实时通道恰好断开重连（那才会发 resyncTick）。递增它才是"所有页面重新拉取"。
+      // 列表页的刷新由 App.vue 对 resyncTick 的统一监听负责（同一个 tick 里做），不会重复拉。
+      realtime.resyncTick += 1
     }
 
     realtime.on('job.completed', (e) => {
@@ -188,8 +194,8 @@ export const useTasksStore = defineStore('tasks', () => {
     realtime.on('job.aborted', (e) => finish(e.jobId, `已中止：${e.reason}`))
 
     realtime.on('snapshot.committed', () => {
-      // 快照提交 → 刷新列表（快照数与上次备份时间都变了）
-      void refreshQuietly()
+      // 快照提交 → 快照数与上次备份时间都变了，让所有页面重新拉取（同上：只刷 store 不够）
+      realtime.resyncTick += 1
     })
 
     realtime.on('monitor.changed', (e) => {

@@ -17,9 +17,8 @@ import {
   VideoPlay,
   View,
 } from '@element-plus/icons-vue'
-import { asApiError, settingsApi } from '@/api'
-import type { AppSettings, BackupTask, NormalizedApiError } from '@/api/types'
-import ChannelBadge from '@/components/ChannelBadge.vue'
+import { asApiError } from '@/api'
+import type { BackupTask } from '@/api/types'
 import ErrorState from '@/components/ErrorState.vue'
 import JobProgressBar from '@/components/JobProgressBar.vue'
 import PathText from '@/components/PathText.vue'
@@ -37,25 +36,14 @@ const editorVisible = ref(false)
 const editing = ref<BackupTask | null>(null)
 const busy = ref<Record<string, boolean>>({})
 
-const settings = ref<AppSettings | null>(null)
-const settingsError = ref<NormalizedApiError | null>(null)
-const togglingAuto = ref(false)
-
 const listError = computed(() => store.error)
 
 onMounted(async () => {
   await store.load()
-  await loadSettings()
 })
 
-async function loadSettings(): Promise<void> {
-  try {
-    settings.value = await settingsApi.getSettings()
-    settingsError.value = null
-  } catch (err) {
-    settingsError.value = asApiError(err)
-  }
-}
+// 本页原先自己拉 /api/settings 只为渲染"自动备份总开关"和实时徽章。
+// 两者都是全局状态，已移到顶栏（AppLayout），这里不再需要 settings。
 
 // 重连/轮询信号后的重新拉取由 **App.vue 统一负责**（它 watch `realtime.resyncTick`
 // 后调 `tasks.onResync()`，也就是本 store 的 `refreshQuietly()`）。
@@ -133,21 +121,6 @@ async function removeTask(task: BackupTask): Promise<void> {
   }
 }
 
-async function toggleAutoBackup(value: string | number | boolean): Promise<void> {
-  if (!settings.value) return
-  const next = Boolean(value)
-  togglingAuto.value = true
-  try {
-    settings.value = await settingsApi.updateSettings({ ...settings.value, autoBackupEnabled: next })
-    ElMessage.success(next ? '自动备份已开启' : '自动备份已关闭（手动备份仍可用）')
-  } catch (err) {
-    ElMessage.error(asApiError(err).message)
-    await loadSettings()
-  } finally {
-    togglingAuto.value = false
-  }
-}
-
 function resultText(task: BackupTask): string {
   const r = task.lastBackupResult
   if (!r) return '尚无备份记录'
@@ -180,36 +153,10 @@ function openDetail(task: BackupTask): void {
         </p>
       </div>
       <div class="fbt-toolbar">
-        <ChannelBadge />
-        <el-divider direction="vertical" />
-        <el-tooltip content="关闭后，定时与监控触发的备份都会被暂停；手动「立即备份」仍可用" placement="bottom">
-          <div class="tasks__auto">
-            <span>自动备份总开关</span>
-            <el-switch
-              :model-value="settings?.autoBackupEnabled ?? false"
-              :loading="togglingAuto"
-              :disabled="!settings"
-              inline-prompt
-              active-text="开"
-              inactive-text="关"
-              @update:model-value="toggleAutoBackup"
-            />
-          </div>
-        </el-tooltip>
         <el-button :icon="Refresh" :loading="store.loading" @click="store.load()">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">新建任务</el-button>
       </div>
     </div>
-
-    <el-alert
-      v-if="settingsError"
-      type="warning"
-      :closable="false"
-      show-icon
-      class="fbt-section"
-      :title="`无法读取全局设置：${settingsError.message}`"
-      description="自动备份总开关与还原根白名单都来自 /api/settings，此接口不可用时这些功能不可操作（不代表设置已关闭）。"
-    />
 
     <ErrorState v-if="listError" :error="listError" @retry="store.load()" />
 
@@ -451,11 +398,4 @@ function openDetail(task: BackupTask): void {
   font-size: 12px;
 }
 
-.tasks__auto {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  padding: 0 4px;
-}
 </style>

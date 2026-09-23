@@ -100,6 +100,11 @@ public sealed class SettingsService(SettingsStore store, IClock clock)
             settings.FailureRateThresholdPercent.ToString(CultureInfo.InvariantCulture),
             ct).ConfigureAwait(false);
 
+        // 还原根白名单：PUT 是**整体替换**语义，这里必须写。
+        // 漏写的后果不是"少存一个字段"——控制器已经校验过、审计也已经记成"白名单已从 A 改成 B"，
+        // 读回来却是空。还原的白名单是硬约束（04 §1.3），白名单为空时还原向导直接无根可选。
+        await SetAllowedRestoreRootsAsync(settings.AllowedRestoreRoots ?? [], ct).ConfigureAwait(false);
+
         if (settings.Retention is { } retention)
         {
             await SetBoolAsync(SettingsStore.KeyRetentionAutoEviction, retention.Enabled, ct).ConfigureAwait(false);

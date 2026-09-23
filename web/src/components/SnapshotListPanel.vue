@@ -67,11 +67,18 @@ const visibleGroups = computed(() =>
 const rows = computed(() => {
   const out: (Snapshot & { groupTime: string; groupType: SnapshotType })[] = []
   for (const g of visibleGroups.value) {
+    // 全量自己**必须**是一行：接口按契约只把增量放进 `snapshots`（全量在 `fullSnapshot` 里，
+    // SnapshotsController 的注释也这么写）。只平铺 `snapshots` 会让全量在表里彻底消失——
+    // 于是"刚做完第一次全量备份"的任务，快照页会显示「没有符合条件的快照」，
+    // 而且全量无法被浏览 / 看变更 / 删除（删除弹窗里写的级联范围也就永远够不着）。
+    const full = g.fullSnapshot
+    out.push({ ...full, groupTime: full.beginTime, groupType: full.type })
+
     const list = [...g.snapshots].sort(
       (a, b) => new Date(b.beginTime).getTime() - new Date(a.beginTime).getTime(),
     )
     for (const s of list) {
-      out.push({ ...s, groupTime: g.fullSnapshot.beginTime, groupType: g.fullSnapshot.type })
+      out.push({ ...s, groupTime: full.beginTime, groupType: full.type })
     }
   }
   return out

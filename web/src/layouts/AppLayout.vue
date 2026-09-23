@@ -2,9 +2,12 @@
 /**
  * 应用主布局：顶部栏 + 左侧导航 + 内容区。
  *
- * 顶部栏承担 07 §7 的全局约定：实时通道状态（实时/轮询）、主题切换（跟随系统/亮/暗）。
+ * 顶部栏承担 07 §7 的全局约定，以及**只有全局才该有的控件**：
+ *   实时通道状态（实时/轮询）、自动备份总开关、主题切换（跟随系统/亮/暗）。
+ * 实时徽章与自动备份总开关原先在任务页/监控页/设置页各挂了一份，现收敛到顶栏这一处——
+ * 它们本来就是全局状态，散在多页只会让"哪个才是准的"变成问题。
  */
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowDown,
@@ -20,15 +23,57 @@ import {
   User,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { asApiError, settingsApi } from '@/api'
+import type { AppSettings, ThemePreference } from '@/api/types'
 import ChannelBadge from '@/components/ChannelBadge.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
-import type { ThemePreference } from '@/api/types'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const theme = useThemeStore()
+
+/**
+ * 自动备份总开关。它是全局状态，所以只有一个入口（顶栏）。
+ * 读不到设置时开关**保持禁用**而不是显示成"已关闭"——把"不知道"画成"关"会误导人。
+ */
+const settings = ref<AppSettings | null>(null)
+const togglingAuto = ref(false)
+
+const autoTip = computed(() =>
+  settings.value
+    ? '关闭后，定时与监控触发的备份都会被暂停；手动「立即备份」仍可用'
+    : '无法读取全局设置（GET /api/settings 不可用），此开关暂不可操作',
+)
+
+onMounted(async () => {
+  try {
+    settings.value = await settingsApi.getSettings()
+  } catch {
+    settings.value = null
+  }
+})
+
+async function toggleAutoBackup(value: string | number | boolean): Promise<void> {
+  if (!settings.value) return
+  const next = Boolean(value)
+  togglingAuto.value = true
+  try {
+    settings.value = await settingsApi.updateSettings({ ...settings.value, autoBackupEnabled: next })
+    ElMessage.success(next ? '自动备份已开启' : '自动备份已关闭（手动备份仍可用）')
+  } catch (err) {
+    ElMessage.error(asApiError(err).message)
+    // PUT 失败后必须回读：否则界面停在用户以为已生效的位置
+    try {
+      settings.value = await settingsApi.getSettings()
+    } catch {
+      settings.value = null
+    }
+  } finally {
+    togglingAuto.value = false
+  }
+}
 
 const activeMenu = computed(() => route.meta.menu ?? 'tasks')
 
@@ -75,6 +120,22 @@ async function handleLogout(): Promise<void> {
       <div class="fbt-spacer" />
 
       <ChannelBadge />
+
+      <!-- 自动备份总开关：夹在实时徽章与主题切换之间（全局控件只此一处） -->
+      <el-tooltip :content="autoTip" placement="bottom">
+        <div class="layout__auto">
+          <span class="layout__auto-label">自动备份</span>
+          <el-switch
+            :model-value="settings?.autoBackupEnabled ?? false"
+            :loading="togglingAuto"
+            :disabled="!settings"
+            inline-prompt
+            active-text="开"
+            inactive-text="关"
+            @update:model-value="toggleAutoBackup"
+          />
+        </div>
+      </el-tooltip>
 
       <el-dropdown trigger="click" @command="setTheme">
         <el-button text :icon="theme.isDark ? Moon : Sunny">
@@ -196,6 +257,20 @@ async function handleLogout(): Promise<void> {
 .layout__caret {
   margin-left: 2px;
   font-size: 12px;
+}
+
+.layout__auto {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 6px;
+  cursor: default;
+}
+
+.layout__auto-label {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  white-space: nowrap;
 }
 
 .layout__body {

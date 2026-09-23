@@ -3,10 +3,13 @@
  * 设置 `/settings`（07 §2、06 §4.9）。
  *
  * 四块：
- *   通用（数据目录 / 日志 / 磁盘占用 + 自动备份总开关 + 失败率阈值）
+ *   通用（失败率阈值 / 深校验默认值 + 服务端信息只读）
  *   安全（改密码 / 会话列表）
  *   还原根白名单（**硬约束**，还原绝不接受白名单之外的路径）
  *   保留策略（默认全手动；开启时必须二次确认）
+ *
+ * 注意：自动备份总开关**不在这里**——它是全局状态，已收敛到顶栏（AppLayout）。
+ * 它仍属于本页保存的同一个 AppSettings（PUT 是整体替换，回读的值会原样带上）。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -259,14 +262,6 @@ onMounted(() => {
           <div class="fbt-pane-title">通用</div>
 
           <el-form label-width="170px" label-position="left">
-            <!-- 对等清单要求：自动备份总开关 -->
-            <el-form-item label="自动备份总开关">
-              <el-switch v-model="settings.autoBackupEnabled" />
-              <span class="fbt-footnote settings__hint">
-                关闭后所有定时与监控触发的备份都会被暂停（手动「立即备份」仍可用）
-              </span>
-            </el-form-item>
-
             <el-form-item label="失败率告警阈值">
               <el-input-number
                 v-model="settings.failureRateThresholdPercent"
