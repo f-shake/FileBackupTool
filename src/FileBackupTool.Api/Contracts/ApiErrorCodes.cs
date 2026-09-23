@@ -16,7 +16,7 @@ public sealed record ApiErrorBody(string Code, string Message, string? Detail = 
 /// 分两类：
 /// <list type="number">
 /// <item><b>通用</b>——HTTP 语义级（401/403/404/409/429/500）。</item>
-/// <item><b>业务</b>——前端要针对性处理的（目录冲突、路径非法、TOTP 未绑定…）。</item>
+/// <item><b>业务</b>——前端要针对性处理的（目录冲突、路径非法、账户已锁定…）。</item>
 /// </list>
 /// 目录关系校验那一组与 <c>DirectoryRelationshipValidator</c> 里的常量一一对应
 /// （直接复用它的值，不重新定义），保证"校验器说什么、API 就说什么"。
@@ -35,9 +35,6 @@ public static class ApiErrorCodes
     public const string AntiforgeryFailed = "ANTIFORGERY_FAILED";
 
     // ---- 认证 / 会话 ----
-    public const string TotpRequired = "TOTP_REQUIRED";
-    public const string TotpNotBound = "TOTP_NOT_BOUND";
-    public const string TotpCodeInvalid = "TOTP_CODE_INVALID";
     public const string LoginFailed = "LOGIN_FAILED";
     public const string AccountLocked = "ACCOUNT_LOCKED";
     public const string PasswordPolicyViolation = "PASSWORD_POLICY_VIOLATION";

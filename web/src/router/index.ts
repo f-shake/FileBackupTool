@@ -115,7 +115,7 @@ router.beforeEach(async (to) => {
   if (auth.status === 'error') return true
 
   if (to.meta.public) {
-    if (to.name === 'login' && auth.isAuthenticated && !auth.mustBindTotp) {
+    if (to.name === 'login' && auth.isAuthenticated) {
       return { name: 'tasks' }
     }
     return true
@@ -123,11 +123,6 @@ router.beforeEach(async (to) => {
 
   if (!auth.isAuthenticated) {
     return { name: 'login', query: { redirect: to.fullPath } }
-  }
-
-  // 强制 TOTP 绑定：未绑定前不能访问任何业务功能（05 §2.2）
-  if (auth.mustBindTotp) {
-    return { name: 'login', query: { step: 'bind' } }
   }
 
   return true

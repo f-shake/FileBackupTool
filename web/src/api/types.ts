@@ -850,39 +850,18 @@ export interface FileFilterRule {
 /* 4.9 认证与设置                                                      */
 /* ------------------------------------------------------------------ */
 
-export interface LoginRequest {
-  username: string
-  password: string
-  /** 已绑定 TOTP 时的动态码 */
-  totpCode?: string
-  /** 或用一次性恢复码代替 */
-  recoveryCode?: string
-}
-
 /**
- * 登录响应（05 §2.2）。
- * `requiresTotpSetup` 为 true 时前端**必须**进入强制绑定流程，未绑定前不得访问任何业务功能。
+ * 登录请求（单密码模式）。
+ * 账号不由用户提供：服务端按配置的 SeedUserName 解析出那唯一的账号。
  */
-export interface LoginResult {
-  /** 需要 TOTP 动态码（已绑定） */
-  requiresTotp: boolean
-  /** 需要先完成 TOTP 绑定（首次登录） */
-  requiresTotpSetup: boolean
-  /** 两者都为 false 时已登录成功 */
-  authenticated: boolean
-  user?: CurrentUser | null
-  /** 绑定完成后一次性返回的恢复码（仅此一次可见） */
-  recoveryCodes?: string[] | null
-  message?: string | null
+export interface LoginRequest {
+  password: string
 }
 
 export interface CurrentUser {
   id: string
   username: string
-  /** 是否已绑定 TOTP */
-  totpEnabled: boolean
-  /** 两步验证是否已确认（未确认 = 必须走绑定流程） */
-  twoFactorConfirmed: boolean
+  /** 本会话的建立时间（不是"上次登录历史"，完整历史在审计日志里） */
   lastLoginTime?: string | null
   lastLoginIp?: string | null
 }
@@ -892,25 +871,6 @@ export interface ChangePasswordRequest {
   currentPassword: string
   newPassword: string
   confirmPassword: string
-}
-
-/** TOTP 绑定：`POST /api/auth/totp/setup` */
-export interface TotpSetupResult {
-  /** Base32 共享密钥，供手输 */
-  sharedKey: string
-  /** otpauth:// URI，供 QR 生成 */
-  authenticatorUri: string
-  /** 服务端直接生成的二维码 PNG（base64，不含 data 前缀） */
-  qrCodePngBase64?: string | null
-}
-
-/** `POST /api/auth/totp/confirm` */
-export interface TotpConfirmRequest {
-  code: string
-}
-
-export interface RecoveryCodesResult {
-  recoveryCodes: string[]
 }
 
 export interface SessionInfo {

@@ -2,7 +2,7 @@
 
 一个**服务端常驻、浏览器控制**的文件备份工具。备份引擎跑在服务器上，浏览器只做控制面。
 
-- **后端**：ASP.NET Core (.NET 10) / Kestrel / SQLite + EF Core / ASP.NET Core Identity + TOTP
+- **后端**：ASP.NET Core (.NET 10) / Kestrel / SQLite + EF Core / ASP.NET Core Identity（**单密码登录**）
 - **前端**：Vue 3 + TypeScript + Vite + Element Plus（构建产物由后端带起）
 - **核心算法**：移植自 `ArchiveMaster.Module.FileBackupper`，但**数据层与存储格式是重新设计的**
 - **部署**：Windows + nginx 终止 TLS，后续可用 nssm 注册为服务
@@ -18,7 +18,7 @@
 | [02 存储与数据模型](docs/plans/02-存储与数据模型.md) | 数据库 schema、备份目录布局、blob 池、回收站、抢救清单 |
 | [03 备份引擎](docs/plans/03-备份引擎.md) | 核心算法、去重与哈希、变更检测、实时监控、调度、错误处理 |
 | [04 还原与快照管理](docs/plans/04-还原与快照管理.md) | 还原流程与冲突策略、快照删除级联、保留策略 |
-| [05 认证与安全](docs/plans/05-认证与安全.md) | Identity、TOTP、会话、nginx 协同、限流、审计、威胁模型 |
+| [05 认证与安全](docs/plans/05-认证与安全.md) | Identity、TOTP、会话、nginx 协同、限流、审计、威胁模型（**TOTP 那部分已按 [09 §L](docs/plans/09-实现期修订.md) 改为单密码登录**） |
 | [06 后端与 API](docs/plans/06-后端与API.md) | 分层、服务契约、REST 端点清单、SignalR 事件 |
 | [07 前端设计](docs/plans/07-前端设计.md) | 信息架构、路由、页面清单、对等与补齐清单 |
 | [08 测试与待定项](docs/plans/08-测试与待定项.md) | 测试策略、CI 门槛、默认值、遗留待定项 |
@@ -101,7 +101,7 @@ dotnet ef migrations add <Name> -p src\FileBackupTool.Data -o Migrations
 
 1. 放置 `appsettings.json`，配置 `DataDir`、连接串、`ReverseProxy:TrustedProxies`。
 2. 用环境变量提供初始账号密码（见上）。
-3. 浏览器登录 → **强制绑定 TOTP** → 保存恢复码（未绑定前不能访问任何业务功能）。
+3. 浏览器输入**那一个密码**即可登录（账号由配置的 `SeedUserName` 解析，界面不要求用户名）。
 4. 配置**还原根白名单**——还原是写文件操作，白名单是最重要的安全缓解。
 
 ## 部署要点

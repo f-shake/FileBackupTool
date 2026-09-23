@@ -103,10 +103,7 @@ async function handleLogout(): Promise<void> {
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item disabled>
-              TOTP：{{ auth.user?.twoFactorConfirmed ? '已绑定' : '未绑定' }}
-            </el-dropdown-item>
-            <el-dropdown-item divided @click="router.push({ name: 'settings' })">
+            <el-dropdown-item @click="router.push({ name: 'settings' })">
               <el-icon><Setting /></el-icon> 设置
             </el-dropdown-item>
             <el-dropdown-item @click="handleLogout">

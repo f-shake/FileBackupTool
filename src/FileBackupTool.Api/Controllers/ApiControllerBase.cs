@@ -84,7 +84,7 @@ public abstract class ApiControllerBase : ControllerBase
         return snapshot;
     }
 
-    /// <summary>取当前登录用户实体（认证流程里改密码/绑定 TOTP 都要用）。</summary>
+    /// <summary>取当前登录用户实体（改密码等认证流程要用）。</summary>
     protected async Task<IdentityUser<Guid>> RequireUserAsync(UserManager<IdentityUser<Guid>> users)
     {
         IdentityUser<Guid>? user = await users.GetUserAsync(User).ConfigureAwait(false);

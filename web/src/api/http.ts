@@ -119,7 +119,7 @@ export function normalizeError(error: unknown): NormalizedApiError {
       return {
         status,
         code: body?.code || 'FORBIDDEN',
-        message: body?.message || '没有权限执行该操作（可能未完成 TOTP 绑定）',
+        message: body?.message || '没有权限执行该操作',
         detail: body?.detail,
         backendUnavailable: false,
       }

@@ -48,7 +48,7 @@ public sealed class IdentitySeeder(
     {
         ct.ThrowIfCancellationRequested();
 
-        string userName = string.IsNullOrWhiteSpace(_security.SeedUserName) ? "admin" : _security.SeedUserName;
+        string userName = _security.EffectiveSeedUserName;
 
         IdentityUser<Guid>? existing = await _users.FindByNameAsync(userName).ConfigureAwait(false);
         if (existing is not null)
@@ -96,7 +96,7 @@ public sealed class IdentitySeeder(
 
         _logger.LogInformation(
             "已创建初始账号 {User}（密码来自环境变量 {Env}，未写入任何文件或日志）。" +
-            "首次登录后必须完成 TOTP 绑定才能使用业务功能。",
+            "登录时只需输入密码，账号由配置的 SeedUserName 解析。",
             userName, envName);
     }
 

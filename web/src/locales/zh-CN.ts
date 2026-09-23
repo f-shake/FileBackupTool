@@ -175,23 +175,39 @@ export const jobTypeLabels: Record<string, string> = {
   Manifest: '生成清单',
 }
 
+/**
+ * 审计事件类型 → 中文。仅用于显示，但**键名是契约**。
+ *
+ * ⚠️ 键必须与后端 `AuditEventNames`（`src/FileBackupTool.Api/Infrastructure/AuditLogger.cs`）
+ * 的字符串**逐字一致**，顺序也照抄那个枚举。理由有两层，都别凭直觉改：
+ *   1. `AuditLog.EventType` 以 int 落库，出参由后端映射成这些字符串。键写错 → 走
+ *      `AuditView` 的 `?? type` 兜底，页面上显示**原始英文码**（中文标签永远不生效）。
+ *   2. `AuditView` 的筛选下拉是直接由本字典的键生成的，选中即作为 `?eventType=` 发给后端；
+ *      而后端对认不出的名字**抛 400**（不静默降级），于是"下拉里有这一项，选了就报错"。
+ *
+ * ⚠️ `TOTP_*` / `RECOVERY_CODE*` 这几条**保留但不再产生新事件**：登录已改为单密码，
+ * 后端不再写它们（`AuditEventType` 的枚举成员与后端映射**故意保留**，因为历史
+ * `AuditLog` 行里存的是对应的 int，删掉枚举会让旧记录退化成数字或被拒收）。
+ * 标签留着，历史行才能正常显示中文。
+ */
 export const auditEventLabels: Record<string, string> = {
   LOGIN_SUCCESS: '登录成功',
   LOGIN_FAILED: '登录失败',
-  TOTP_VERIFY_SUCCESS: 'TOTP 校验成功',
-  TOTP_VERIFY_FAILED: 'TOTP 校验失败',
-  LOGOUT: '登出',
+  TOTP_SUCCESS: 'TOTP 校验成功',
+  TOTP_FAILED: 'TOTP 校验失败',
   SESSION_CREATED: '会话创建',
   SESSION_REVOKED: '会话踢出',
   PASSWORD_CHANGED: '密码修改',
   TOTP_REBOUND: 'TOTP 重绑',
   RECOVERY_CODE_USED: '恢复码使用',
-  TASK_CREATE: '新建任务',
-  TASK_UPDATE: '任务配置变更',
-  TASK_DELETE: '删除任务',
+  RECOVERY_CODES_REGENERATED: '恢复码重新生成',
+  TASK_CREATED: '新建任务',
+  TASK_UPDATED: '任务配置变更',
+  TASK_DELETED: '删除任务',
   SNAPSHOT_DELETE: '快照删除',
   RESTORE_EXECUTE: '还原执行',
-  RECYCLE_BIN_EMPTY: '清空回收站',
+  RECYCLE_BIN_CLEAR: '清空回收站',
+  SETTINGS_CHANGED: '设置变更',
 }
 
 /* ------------------------------------------------------------------ */

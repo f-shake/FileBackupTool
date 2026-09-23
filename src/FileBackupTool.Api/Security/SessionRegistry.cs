@@ -228,7 +228,7 @@ public sealed class SessionRegistry(
     }
 
     /// <summary>
-    /// 失效某个用户的全部会话。改密码 / TOTP 重绑时调用。
+    /// 失效某个用户的全部会话。改密码时调用。
     /// </summary>
     /// <remarks>
     /// 设计文档 05 §3 说"改密码靠 Identity 安全戳一次性失效全部会话"——那是对的，

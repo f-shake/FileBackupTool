@@ -150,12 +150,11 @@ builder.Services.AddSingleton(runtimeInfo);
 builder.Services.AddHttpContextAccessor();
 
 // 数据保护密钥环放在数据目录里（设计文档 05 §7）。
-// 两件事同时依赖它：Cookie 票据的加解密，以及 Identity 用 Data Protection
-// **加密后的 TOTP 密钥**。因此：
+// Cookie 票据的加解密依赖它。因此：
 //   · 目录必须在 DataDir 内——HardExcludeFileFilter 会把 DataDir 整个排除在备份之外，
 //     密钥环进了备份就等于把"伪造会话"的能力一起备份了；
 //   · 应用名必须显式固定。默认值是 ContentRoot 的路径，那样一旦把整个目录挪个位置
-//     （便携部署最常见的操作），密钥环换名 → 所有会话失效、**所有 TOTP 都验证不过**。
+//     （便携部署最常见的操作），密钥环换名 → **所有会话失效**。
 builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(paths.KeysDir))
     .SetApplicationName("FileBackupTool");
@@ -233,11 +232,11 @@ builder.Services
         options.SignIn.RequireConfirmedEmail = false;
     })
     .AddEntityFrameworkStores<AppDbContext>()
-    // TOTP 的令牌生成器（"Authenticator"）与恢复码的令牌提供者都由它注册。
-    // 缺少它时 GetAuthenticatorKeyAsync 会在运行期抛 NotSupportedException——
-    // 而这个错误只在用户点"绑定两步验证"时才出现，属于最不该出现在线上的失败方式。
-    .AddDefaultTokenProviders()
-    .AddClaimsPrincipalFactory<AppClaimsPrincipalFactory>()
+    // 这里原先有 .AddDefaultTokenProviders()（TOTP 验证器与恢复码的令牌提供者），
+    // 随 TOTP 一起删除——全仓已无任何 token provider 的解析点，删掉不影响任何现存路径。
+    // ⚠️ 但缺失是**静默的**：DI 只在**解析**时失败，不在启动期。将来若加"邮箱确认"或
+    // "密码重置"，UserManager.GenerateXxxTokenAsync 会在运行期抛 NotSupportedException
+    // （正是被删那段注释警告过的失败方式）。届时必须把这一行加回来。
     // "密码不得与用户名相同"（Identity 内置的 PasswordValidator 不比较用户名）。
     // 注册成校验器即覆盖播种建号、改密码等所有入口。
     .AddPasswordValidator<UserNamePasswordValidator>();
@@ -251,8 +250,7 @@ builder.Services.ConfigureApplicationCookie(options =>
     // Secure 策略取 SameAsRequest 而不是 Always：本程序在生产里由 nginx 终止 TLS
     //（01 §7.2），而 ForwardedHeaders 采信 X-Forwarded-Proto 之后请求在应用内就是 https，
     // 于是等价于 Always。唯一"不设 Secure"的场合是直接 http://localhost 本机调试——
-    // 那里若强制 Secure，浏览器会直接丢弃 Cookie，结果是**根本登录不了**
-    //（连绑定 TOTP 都走不到），比降级这一项更难排查。
+    // 那里若强制 Secure，浏览器会直接丢弃 Cookie，结果是**根本登录不了**，比降级这一项更难排查。
     options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
     options.ExpireTimeSpan = TimeSpan.FromDays(Math.Max(1, securityOptions.CookieSlidingDays));
     // 滑动 7 天；绝对 30 天由 SessionValidationEvents 负责（Cookie 中间件只有滑动）。
@@ -563,7 +561,7 @@ app.UseRouting();
 // 而写请求的校验发生在认证之后（身份是 admin）→ 报
 // "The provided antiforgery token was meant for a different claims-based user than the current user"，
 // 症状是"登录之后所有写操作 400、读操作全正常"。
-// 现在令牌**只**由 GET /api/auth/csrf 在认证之后签发，见下方 ⑩。
+// 现在令牌**只**由 GET /api/auth/csrf 在认证之后签发，见下方 ⑨。
 
 // ⑦ 认证：必须在限流之前，因为全局限流要按"已认证 / 匿名"分档。
 app.UseAuthentication();
@@ -571,13 +569,9 @@ app.UseAuthentication();
 // ⑧ 限流：放在认证之后（分区键要用 User）、授权之前（未登录的重请求也该被挡住）。
 app.UseRateLimiter();
 
-// ⑨ 强制 TOTP 闸门：认证之后（要看 HttpContext.User）、授权之前
-//    （未登录仍由授权层给标准 401，而不是被这里误报成 403）。
-app.UseMiddleware<TotpRequiredMiddleware>();
-
 app.UseAuthorization();
 
-// ⑩ antiforgery 令牌**只由** GET /api/auth/csrf 签发（见 AuthController.Csrf），
+// ⑨ antiforgery 令牌**只由** GET /api/auth/csrf 签发（见 AuthController.Csrf），
 // 所以这里没有"在安全方法上顺手签发"的中间件。
 //
 // 为什么不能有第二个签发点：ASP.NET Core 的 antiforgery 是**配对令牌**——
@@ -588,7 +582,7 @@ app.UseAuthorization();
 // 症状是**登录之后所有写操作 400、读操作全正常**。
 // 保持"唯一签发点 + 它在认证之后"，cookie 就永远与最后一次签发的请求令牌同身份。
 
-// ⑪ 端点。
+// ⑩ 端点。
 app.MapControllers();
 app.MapHub<EventsHub>("/hubs/events");
 

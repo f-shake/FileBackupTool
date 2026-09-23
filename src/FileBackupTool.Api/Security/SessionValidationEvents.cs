@@ -25,7 +25,7 @@ namespace FileBackupTool.Api.Security;
 /// <para>
 /// <b>三层校验的顺序</b>：
 /// <list type="number">
-/// <item>安全戳——改密码 / 重绑 TOTP 后，所有已签发的票据作废（05 §3）。</item>
+/// <item>安全戳——改密码后，所有已签发的票据作废（05 §3）。</item>
 /// <item>会话登记表——支持"单独踢出某个会话"（05 §3），这是安全戳做不到的粒度。</item>
 /// <item>绝对过期——滑动 7 天 + 绝对 30 天（05 §3）。Cookie 的 <c>ExpireTimeSpan</c>
 /// 只有滑动，没有绝对上限，不额外判就等于"只要一直用就永不过期"。</item>

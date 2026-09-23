@@ -1,20 +1,11 @@
 /**
  * 06 §4.9 认证端点。
  *
- * 流程见 docs/plans/05-认证与安全.md：
- *   登录 → 强制 TOTP 绑定（未绑定前不能访问任何业务功能）→ 保存恢复码
- *   Cookie 载体（HttpOnly + Secure + SameSite=Strict），滑动 7 天 / 绝对 30 天
+ * 单密码模式：登录只需密码，账号由服务端按配置解析。
+ * Cookie 载体（HttpOnly + Secure + SameSite=Strict），滑动 7 天 / 绝对 30 天。
  */
 import { del, get, post, resetCsrfToken } from './http'
-import type {
-  ChangePasswordRequest,
-  CurrentUser,
-  LoginRequest,
-  LoginResult,
-  RecoveryCodesResult,
-  SessionInfo,
-  TotpSetupResult,
-} from './types'
+import type { ChangePasswordRequest, CurrentUser, LoginRequest, SessionInfo } from './types'
 
 /**
  * `POST /api/auth/login` —— 登录（限流 + 锁定）
@@ -24,8 +15,8 @@ import type {
  * `meant for a different claims-based user` 拒绝），
  * 表现为"读操作全好、写操作全 400"。这里重置后，下一个写请求会按新身份重取。
  */
-export async function login(body: LoginRequest): Promise<LoginResult> {
-  const result = await post<LoginResult>('/auth/login', body)
+export async function login(body: LoginRequest): Promise<CurrentUser> {
+  const result = await post<CurrentUser>('/auth/login', body)
   resetCsrfToken()
   return result
 }
@@ -40,28 +31,6 @@ export async function logout(): Promise<void> {
 /** `GET /api/auth/me` —— 当前用户信息 */
 export function getCurrentUser(): Promise<CurrentUser> {
   return get<CurrentUser>('/auth/me')
-}
-
-/**
- * `POST /api/auth/totp/setup` —— 取 TOTP 密钥与 otpauth URI。
- *
- * ⚠️ `password` **只在"已绑定状态下的重绑"时必填**：此时服务端返回的正是**当前生效**的密钥，
- * 而且随后的 `confirm` 会换掉全部恢复码——两者合起来等于签发一把永久钥匙，
- * 所以必须重新证明身份（首次绑定不需要，用户刚刚用密码登录过）。
- * 不传会得到 400 `当前密码不正确`。
- */
-export function setupTotp(password?: string): Promise<TotpSetupResult> {
-  return post<TotpSetupResult>('/auth/totp/setup', { password: password ?? null })
-}
-
-/** `POST /api/auth/totp/confirm` —— 确认绑定（返回一次性恢复码）。`password` 的必填规则同上。 */
-export function confirmTotp(code: string, password?: string): Promise<RecoveryCodesResult> {
-  return post<RecoveryCodesResult>('/auth/totp/confirm', { code, password: password ?? null })
-}
-
-/** `POST /api/auth/totp/recovery-codes` —— 重新生成恢复码 */
-export function regenerateRecoveryCodes(password: string): Promise<RecoveryCodesResult> {
-  return post<RecoveryCodesResult>('/auth/totp/recovery-codes', { password })
 }
 
 /** `POST /api/auth/password` —— 改密码（失效全部会话） */

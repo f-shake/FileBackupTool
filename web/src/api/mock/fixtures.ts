@@ -398,26 +398,47 @@ export function makeLogs(count = 300, taskId = mockTasks[0]!.id): BackupLogEntry
   })
 }
 
+/**
+ * 审计假数据。
+ *
+ * ⚠️ `eventType` / `target` / `detail` 一律照**后端真实写入的形状**写，不要凭"看起来合理"编。
+ * mock 模式是开发期唯一能看到的形态，假数据与真实契约不一致，会让人照着一份错的形状去对齐
+ * （审计页的「目标」列是直接渲染 `target` 的）。
+ *
+ * ⚠️ 尤其 `target`：后端**只会**写这四种——用户名、任务名、`任务名/快照号`、以及字面量 `全局设置`；
+ * 没有 `session:` / `task:` / `snapshot:` 这类前缀。各写入点见
+ * `AuthController` / `TasksController` / `SnapshotsController` / `RestoreController` / `SettingsController`
+ * 里的 `AuditLogger.WriteAsync` 调用。
+ *
+ * `detail` 中「会话创建的来源 IP/UA」「还原与快照删除的结果」由控制器动态拼，此处只保证格式像样；
+ * 而 `LOGIN_FAILED` / `TASK_UPDATED` 两条的 detail 是**固定格式**，已逐字对齐。
+ */
 export const mockAudit: AuditLogEntry[] = [
   {
     id: 1,
     time: iso(0, 2, 59),
-    eventType: 'LOGIN_SUCCESS',
+    // 用 `SESSION_CREATED` 而不是 `LOGIN_SUCCESS`：后者在后端**没有任何写入方**
+    //（`AuditEventType.LoginSucceeded` 只有枚举定义与名称映射），成功登录的真实留痕
+    // 就是这条会话创建。
+    eventType: 'SESSION_CREATED',
     actor: 'admin',
     sourceIp: '203.0.113.42',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140.0',
-    target: 'session:8f3a…c40',
-    detail: null,
+    // target 是**用户名**；会话 id 在后端属于 detail，不是 target。
+    target: 'admin',
+    detail: '新会话 8f3a…c40 建立（来源 203.0.113.42）。',
   },
   {
     id: 2,
     time: iso(0, 2, 58),
-    eventType: 'TOTP_VERIFY_SUCCESS',
+    // 登录改为单密码后 TOTP 事件不再产生，这里换成后端**真的会写**的事件，
+    // 免得这份假数据把"TOTP 事件还会出现"这个错觉传染给照着 mock 对齐契约的人。
+    eventType: 'PASSWORD_CHANGED',
     actor: 'admin',
     sourceIp: '203.0.113.42',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140.0',
-    target: 'totp',
-    detail: null,
+    target: 'admin',
+    detail: '密码已修改，2 个会话被强制失效（含当前会话）。',
   },
   {
     id: 3,
@@ -426,7 +447,8 @@ export const mockAudit: AuditLogEntry[] = [
     actor: 'admin',
     sourceIp: '203.0.113.42',
     userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 19_0 like Mac OS X) Safari/604.1',
-    target: 'snapshot:31 → E:\\Restore\\Photo',
+    // 后端写 $"{task.Name}/{SnapshotId}"。
+    target: '文档备份/31',
     detail: '成功 320 / 跳过 4 / 失败 0',
   },
   {
@@ -436,7 +458,8 @@ export const mockAudit: AuditLogEntry[] = [
     actor: 'admin',
     sourceIp: '203.0.113.42',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140.0',
-    target: 'snapshot:4',
+    // 后端写 $"{task.Name}/{sid}"。
+    target: '文档备份/4',
     detail: '级联影响 1 个快照',
   },
   {
@@ -446,18 +469,21 @@ export const mockAudit: AuditLogEntry[] = [
     actor: 'admin',
     sourceIp: '198.51.100.7',
     userAgent: 'curl/8.10.1',
-    target: 'password',
-    detail: '密码错误（第 3 次，阈值 5）',
+    // 后端写用户名作 target、失败原因作 detail。密码错时原因是固定的「密码不正确」——
+    // "还剩几次"只写进日志，**不进审计**，所以这里不能编一个带次数的 detail。
+    target: 'admin',
+    detail: '密码不正确',
   },
   {
     id: 6,
     time: iso(5, 2, 1),
-    eventType: 'TASK_UPDATE',
+    eventType: 'TASK_UPDATED',
     actor: 'admin',
     sourceIp: '203.0.113.42',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140.0',
-    target: 'task:文档备份',
-    detail: 'timeIntervalMinutes: 60 → 120；isDefaultVirtualBackup: false → true',
+    // 后端写 task.Name 作 target，detail 是固定的配置摘要格式。
+    target: '文档备份',
+    detail: '源 E:\\Photo；备份 D:\\Backup\\Photo；定时 True；监控 True；启用 True',
   },
 ]
 
@@ -588,8 +614,6 @@ export const mockServerInfo: ServerInfo = {
 export const mockUser: CurrentUser = {
   id: 'u-1',
   username: 'admin',
-  totpEnabled: true,
-  twoFactorConfirmed: true,
   lastLoginTime: iso(0, 2, 59),
   lastLoginIp: '203.0.113.42',
 }

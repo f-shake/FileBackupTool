@@ -1,5 +1,3 @@
-using System.Globalization;
-using System.Text;
 using FileBackupTool.Api.Configuration;
 using FileBackupTool.Api.Contracts;
 using FileBackupTool.Api.Infrastructure;
@@ -20,24 +18,17 @@ namespace FileBackupTool.Api.Controllers;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>TOTP 全部走 Identity 内置能力</b>（<c>GetAuthenticatorKeyAsync</c> /
-/// <c>VerifyTwoFactorTokenAsync</c> / <c>GenerateNewTwoFactorRecoveryCodesAsync</c> /
-/// <c>RedeemTwoFactorRecoveryCodeAsync</c>）：这些方法的密钥格式、恢复码格式、
-/// 一次性语义都是 Identity 的既定行为，自己实现一遍只会引入不兼容与"恢复码能重复用"这类漏洞。
+/// <b>单密码模式</b>：登录请求体里只有密码。账号不由用户提供，服务端按
+/// <see cref="SecurityOptions.EffectiveSeedUserName"/> 解析出那唯一的账号并校验密码，
+/// 校验通过即签发会话。没有第二因素，也没有"密码对了但还不能进"的中间态。
 /// </para>
 /// <para>
-/// <b>登录为什么不是"用户名密码换一个会话令牌"</b>：这是 Cookie 认证的两步式登录
-/// （密码 → 动态码），但**第二步不发任何中间态凭据**。前端把用户名与密码**再发一次**
-/// （见 <c>LoginView.submitTotp</c>），服务端每次都用密码重新验证一遍。
-/// 这样做比 Identity 默认的"两因素 cookie"少一份状态：没有"密码已验证但还没过第二关"
-/// 的中间票据可以被人捡走。代价是密码在第二次请求里又传一遍——它本来就在同一条 TLS 连接上，
-/// 而 <c>SameSite=Strict</c> + 同源前端让跨站重放无从下手。
+/// <b>为什么保留 Identity</b>：账号存储、PBKDF2 口令哈希、账户锁定都是 Identity 的既有能力，
+/// 自己实现一遍只会引入"锁定恒不生效"或哈希参数写错这类静默故障。这里只做减法，不做替换。
 /// </para>
 /// <para>
-/// <b>动态码错误时返回 200 而不是 401</b>：密码本身是对的，错的只是第二因素。
-/// 而前端的 401 拦截器会全局登出并跳登录页——那会把用户正在输入的动态码步骤整个清空，
-/// 让"码打错一位"变成一个看起来像掉线的错误。所以这里用 <c>RequiresTotp + message</c>
-/// 表达"再来一次"，失败**照样**计数与审计（<c>TOTP_FAILED</c>），安全语义没有放松。
+/// <b>密码是唯一的一道门，所以登录的防护一个都没减</b>：登录端点有每 IP 每 5 分钟 5 次的限流，
+/// 连续失败 5 次锁定账户 15 分钟（Identity 维护），失败一律写审计。
 /// </para>
 /// </remarks>
 [Route("api/auth")]
@@ -52,12 +43,6 @@ public sealed class AuthController(
     IOptions<AccountLockoutOptions> lockoutOptions,
     ILogger<AuthController> logger) : ApiControllerBase
 {
-    /// <summary>绑定成功时一次性签发的恢复码个数。</summary>
-    private const int RecoveryCodeCount = 10;
-
-    /// <summary>otpauth URI 里的发行方名称（验证器里显示的条目名）。</summary>
-    private const string Issuer = "FileBackupTool";
-
     private readonly UserManager<IdentityUser<Guid>> _users = users;
     private readonly SignInManager<IdentityUser<Guid>> _signIn = signIn;
     private readonly SessionRegistry _sessions = sessions;
@@ -93,8 +78,8 @@ public sealed class AuthController(
     [AllowAnonymous]
     public CsrfTokenDto Csrf()
     {
-        // GetAndStoreTokens 会顺带保证 XSRF-TOKEN cookie 已经就位（AntiforgeryTokenMiddleware
-        // 在安全方法上也做了一次，两处都调是幂等的，内部会复用已有的合法 cookie）。
+        // GetAndStoreTokens 会顺带保证 XSRF-TOKEN cookie 已经就位
+        //（内部会复用已有的合法 cookie，重复调用是幂等的）。
         AntiforgeryTokenSet tokens = _antiforgery.GetAndStoreTokens(HttpContext);
 
         return new CsrfTokenDto(tokens.RequestToken ?? string.Empty);
@@ -119,9 +104,7 @@ public sealed class AuthController(
         // 只 `Delete(name)` 时，浏览器收到的是一条**没有 Path** 的删除指令，于是它会按
         // "当前请求路径所在的目录"去匹配（登录是 `/api/auth/login` → `/api/auth`），
         // 而 antiforgery 的 cookie token 落在应用路径根（`/`）——两者对不上，
-        // **这个 cookie 根本删不掉**，09 H3b 记的"服务端删掉 XSRF-TOKEN"这道保险
-        // 实际上是个空操作。（真正兜住的是前端那次 `resetCsrfToken()`，
-        // 所以症状一直没暴露。若后来有人信任 09 那条记录而删掉前端那半，就真没有防线了。）
+        // **这个 cookie 根本删不掉**（真正兜住的是前端那次 `resetCsrfToken()`）。
         //
         // 删除的匹配键是 **name + domain + path**，所以这两个字段必须与签发时一致；
         // 其余属性（Secure / SameSite / MaxAge）不参与匹配，不用管。
@@ -135,37 +118,35 @@ public sealed class AuthController(
     }
 
     /// <summary>登录。限流（每 IP 每 5 分钟 5 次）+ 账户锁定（连续 5 次失败锁 15 分钟）。</summary>
+    /// <remarks>
+    /// 单密码模式：请求体只有密码，账号由配置解析。刻意保留"先判锁定再验密码"的顺序
+    /// （已锁定的账户连密码都不该被校验，少一次昂贵的哈希），以及把失败计进锁定——
+    /// 单密码 + 公网暴露时，暴力破解是首要风险。
+    /// </remarks>
     [HttpPost("login")]
     [AllowAnonymous]
     [EnableRateLimiting(RateLimitPolicies.Login)]
-    public async Task<LoginResultDto> LoginAsync([FromBody] LoginRequestDto input)
+    public async Task<CurrentUserDto> LoginAsync([FromBody] LoginRequestDto input)
     {
-        string userName = input.Username?.Trim() ?? string.Empty;
         string password = input.Password ?? string.Empty;
 
-        if (userName.Length == 0 || password.Length == 0)
+        if (password.Length == 0)
         {
-            throw ApiException.BadRequest(ApiErrorCodes.InvalidRequest, "用户名与密码都不能为空。");
+            throw ApiException.BadRequest(ApiErrorCodes.InvalidRequest, "密码不能为空。");
         }
 
+        string userName = _security.EffectiveSeedUserName;
         IdentityUser<Guid>? user = await _users.FindByNameAsync(userName).ConfigureAwait(false);
 
-        // 用户名不存在时**必须**做到与"密码错误"完全不可区分——状态码、code、message
-        // 都已经一致，但还差两样，见下。
         if (user is null)
         {
-            await AuditLoginFailedAsync(userName, "用户不存在").ConfigureAwait(false);
+            // 播种在宿主启动时完成，正常走不到这里。真走到了说明库被外部改动过——
+            // 必须记 Error 并在审计里留痕，否则用户会对着正确的密码一直猜。
+            _logger.LogError("配置的账号 {User} 在数据库中不存在，无法登录。", userName);
 
-            // 其一：**时间侧信道**。这里若直接抛，用时接近 0；而存在的用户要做一次 PBKDF2
-            // （几十毫秒）。一个 RTT 就能把"这个用户名存不存在"量出来。
-            // 这一句是等价的哈希开销，只为把两条路径的耗时拉平。
-            _ = _users.PasswordHasher.HashPassword(TimingEqualizerUser, password);
+            await AuditLoginFailedAsync(userName, "账号不存在").ConfigureAwait(false);
 
-            // 其二在 RegisterFailureAsync 里：那条 401 **不能**带"还剩几次"的 detail
-            // （不存在时 detail 为 null，存在时有值 → 又是一个可分辨信号）。
-            throw ApiException.Unauthorized(
-                ApiErrorCodes.LoginFailed,
-                "用户名或密码不正确。");
+            throw ApiException.Unauthorized(ApiErrorCodes.LoginFailed, "密码不正确。");
         }
 
         // 先判锁定再验密码：已锁定的账户连密码都不该被校验（少一次昂贵的哈希）。
@@ -177,83 +158,14 @@ public sealed class AuthController(
 
         if (!await _users.CheckPasswordAsync(user, password).ConfigureAwait(false))
         {
-            throw await RegisterFailureAsync(user, AuditEventType.LoginFailed, "密码不正确").ConfigureAwait(false);
+            throw await RegisterFailureAsync(user, "密码不正确").ConfigureAwait(false);
         }
 
-        // 密码对了：清零失败计数。**必须在第二因素之前清零**——
-        // 否则"密码打错 4 次后终于对了，然后动态码打错 1 次"会被算成第 5 次而锁定，
-        // 而用户完全无法理解为什么。
         await _users.ResetAccessFailedCountAsync(user).ConfigureAwait(false);
 
-        bool totpBound = await _users.GetTwoFactorEnabledAsync(user).ConfigureAwait(false);
-
-        if (totpBound)
-        {
-            string? code = input.TotpCode?.Trim();
-            string? recoveryCode = input.RecoveryCode?.Trim();
-
-            if (!string.IsNullOrEmpty(recoveryCode))
-            {
-                return await CompleteRecoveryCodeLoginAsync(user, recoveryCode).ConfigureAwait(false);
-            }
-
-            if (string.IsNullOrEmpty(code))
-            {
-                // 第二因素还没提供。**不签发任何会话**（见类注释）。
-                return new LoginResultDto
-                {
-                    RequiresTotp = true,
-                    Message = "请输入验证器上的 6 位动态码。",
-                };
-            }
-
-            bool ok = await _users
-                .VerifyTwoFactorTokenAsync(user, TokenOptions.DefaultAuthenticatorProvider, code)
-                .ConfigureAwait(false);
-
-            if (!ok)
-            {
-                await AuditLoginFailedAsync(userName, "动态码不正确", AuditEventType.TwoFactorFailed)
-                    .ConfigureAwait(false);
-
-                // 动态码错误同样计入锁定：不计数的话，"密码已知 + 猜动态码"就变成了
-                // 一条没有次数上限的无限尝试通道（6 位码在窗口内只有 100 万种，但可以一直试）。
-                await _users.AccessFailedAsync(user).ConfigureAwait(false);
-
-                if (await _users.IsLockedOutAsync(user).ConfigureAwait(false))
-                {
-                    throw AccountLocked(user);
-                }
-
-                // 刻意返回 200（见类注释）：前端要留在动态码这一步。
-                return new LoginResultDto
-                {
-                    RequiresTotp = true,
-                    Message = "动态码不正确，请检查设备时间是否准确后重试。",
-                };
-            }
-
-            await _audit.WriteAsync(
-                AuditEventType.TwoFactorSucceeded,
-                target: user.UserName,
-                detail: "登录时的两步验证通过。",
-                actor: user.UserName,
-                ct: Ct).ConfigureAwait(false);
-        }
-
-        // 到这里：密码对，且（若已绑定）动态码也对。
         SessionRecord record = await CreateSessionAsync(user).ConfigureAwait(false);
 
-        return new LoginResultDto
-        {
-            // 已绑定 TOTP：正常登录完成。
-            // 未绑定：也发会话，但**不是**"登录成功"——前端据此进入强制绑定流程。
-            // 服务端的闸门在 TotpRequiredMiddleware：这种会话访问任何业务端点都是 403。
-            Authenticated = totpBound,
-            RequiresTotpSetup = !totpBound,
-            User = BuildCurrentUser(user, record),
-            Message = totpBound ? null : "这是首次登录，必须先绑定两步验证（TOTP）才能使用其他功能。",
-        };
+        return BuildCurrentUser(user, record);
     }
 
     /// <summary>登出（只结束当前会话，其他设备的会话保持有效）。</summary>
@@ -281,240 +193,13 @@ public sealed class AuthController(
         return NoContent();
     }
 
-    /// <summary>当前用户信息。前端路由守卫靠它判断"要不要去绑定 TOTP"。</summary>
+    /// <summary>当前用户信息。前端路由守卫靠它判断"是否已登录"。</summary>
     [HttpGet("me")]
     public async Task<CurrentUserDto> MeAsync()
     {
         IdentityUser<Guid> user = await RequireUserAsync(_users).ConfigureAwait(false);
 
         return BuildCurrentUser(user, _sessions.Get(CurrentSessionId));
-    }
-
-    /// <summary>
-    /// TOTP 绑定第一步：生成（或取回）共享密钥与 <c>otpauth://</c> URI。
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>后端不生成二维码图片</b>（05 §2.2 的实现约定）：只给 URI，由前端渲染。
-    /// 这样服务端不引入任何 QR/图像依赖，也少一处会把 secret 写进日志/缓存的代码。
-    /// 因此 <c>qrCodePngBase64</c> 恒为 <c>null</c>——前端已经按"没有图片就显示密钥手输"处理。
-    /// </para>
-    /// <para>
-    /// <b>重复调用不会作废已确认的密钥</b>：<c>GetAuthenticatorKeyAsync</c> 只读不写，
-    /// 密钥只在**不存在**时才生成一次。这一点很关键——如果每次打开绑定页都换一把新密钥，
-    /// 用户刷新一次页面就会把刚在手机里存好的条目变成废码。
-    /// </para>
-    /// <para>
-    /// <b>已绑定后再次调用 = 重绑</b>：这需要重新扫一次新密钥，属于"换手机"的正常路径。
-    /// 但它也会让旧设备的动态码立刻失效，所以这里记一条 Warning + 审计；
-    /// 若用户在 <c>confirm</c> 之前放弃，就得用恢复码登录（这正是恢复码存在的意义）。
-    /// </para>
-    /// <para>
-    /// <b>重绑必须提供当前密码</b>（首次绑定不需要——用户刚刚用密码登录过）。
-    /// 这道校验不是加固，是补一个漏洞：本端点会**原样返回当前生效的** TOTP 密钥
-    /// （<c>GetAuthenticatorKeyAsync</c> 只读不写，见上），而 <c>confirm</c> 会换掉全部恢复码。
-    /// 两者合起来等价于"给自己签发一把永久钥匙"——一个只拿到会话 Cookie 的攻击者
-    /// 因此能读出长期密钥、把第二因素绑到自己的验证器上、并作废用户手里那张恢复码纸。
-    /// 而本产品**没有自助恢复通道**：合法用户会被永久锁在门外。
-    /// 同一份文件里的 <c>totp/recovery-codes</c> 早就确立了"签发永久凭据必须重新证明身份"这条规则
-    /// （那里的注释写着"一个只有会话 Cookie 的攻击者不该能给自己签发一套永久钥匙"），
-    /// 这两个端点当初漏了同一道校验。
-    /// </para>
-    /// </remarks>
-    [HttpPost("totp/setup")]
-    public async Task<TotpSetupResultDto> SetupTotpAsync([FromBody] TotpSetupRequestDto? input = null)
-    {
-        IdentityUser<Guid> user = await RequireUserAsync(_users).ConfigureAwait(false);
-
-        bool alreadyBound = await _users.GetTwoFactorEnabledAsync(user).ConfigureAwait(false);
-
-        if (alreadyBound)
-        {
-            await RequireCurrentPasswordAsync(user, input?.Password, "重绑两步验证（取密钥阶段）时密码校验失败。")
-                .ConfigureAwait(false);
-
-            _logger.LogWarning("用户 {User} 在已绑定 TOTP 的情况下重新请求了绑定密钥（重绑）。", user.UserName);
-        }
-
-        string? key = await _users.GetAuthenticatorKeyAsync(user).ConfigureAwait(false);
-
-        if (string.IsNullOrEmpty(key))
-        {
-            await _users.ResetAuthenticatorKeyAsync(user).ConfigureAwait(false);
-            key = await _users.GetAuthenticatorKeyAsync(user).ConfigureAwait(false);
-        }
-
-        if (string.IsNullOrEmpty(key))
-        {
-            // 理论上不可达（刚重置过）。真发生了说明存储层出了问题，必须明说而不是返回空密钥。
-            throw ApiException.Conflict(
-                ApiErrorCodes.Conflict,
-                "无法生成两步验证密钥，请查看服务器日志。",
-                "Identity 的 AuthenticatorKey 存储未能返回密钥。");
-        }
-
-        return new TotpSetupResultDto
-        {
-            // 分组显示只是为了好念好抄；URI 里用未分组的原始密钥。
-            SharedKey = FormatKey(key),
-            AuthenticatorUri = BuildAuthenticatorUri(user.UserName ?? string.Empty, key),
-
-            // 后端不生成图片（见 remarks）。
-            QrCodePngBase64 = null,
-        };
-    }
-
-    /// <summary>TOTP 绑定第二步：确认动态码，成功后一次性返回恢复码。</summary>
-    [HttpPost("totp/confirm")]
-    [EnableRateLimiting(RateLimitPolicies.Write)]
-    public async Task<RecoveryCodesResultDto> ConfirmTotpAsync([FromBody] TotpConfirmRequestDto input)
-    {
-        IdentityUser<Guid> user = await RequireUserAsync(_users).ConfigureAwait(false);
-
-        string code = input.Code?.Trim() ?? string.Empty;
-
-        if (code.Length == 0)
-        {
-            throw ApiException.BadRequest(ApiErrorCodes.InvalidRequest, "必须提供动态码。");
-        }
-
-        // 先判"是否已绑定"：重绑必须提供当前密码（与 setup 同一道校验，理由见那里的 remarks）。
-        // 这一步必须在**任何状态变更之前**，否则密码校验形同虚设——
-        // 本方法会写 TwoFactorEnabled 并换掉全部恢复码。
-        bool wasBound = await _users.GetTwoFactorEnabledAsync(user).ConfigureAwait(false);
-        if (wasBound)
-        {
-            await RequireCurrentPasswordAsync(user, input.Password, "重绑两步验证（确认阶段）时密码校验失败。")
-                .ConfigureAwait(false);
-        }
-
-        bool ok = await _users
-            .VerifyTwoFactorTokenAsync(user, TokenOptions.DefaultAuthenticatorProvider, code)
-            .ConfigureAwait(false);
-
-        if (!ok)
-        {
-            await AuditLoginFailedAsync(user.UserName ?? string.Empty, "绑定时动态码校验失败",
-                AuditEventType.TwoFactorFailed).ConfigureAwait(false);
-
-            await _users.AccessFailedAsync(user).ConfigureAwait(false);
-
-            throw ApiException.BadRequest(
-                ApiErrorCodes.TotpCodeInvalid,
-                "动态码不正确，请检查设备时间是否准确后重试。");
-        }
-
-        user.TwoFactorEnabled = true;
-
-        IdentityResult updated = await _users.UpdateAsync(user).ConfigureAwait(false);
-        if (!updated.Succeeded)
-        {
-            throw ApiException.Conflict(
-                ApiErrorCodes.Conflict,
-                "保存两步验证设置失败。",
-                Describe(updated));
-        }
-
-        // 刻意**不**更新安全戳：安全戳一变，当前会话的票据立刻失效（本宿主每个请求都校验它），
-        // 用户会在"绑定成功"的瞬间被踢到登录页，而恢复码还没看到。
-        // 票据里的 fbt:totp 仍是 false，但闸门中间件在快路径未命中时会回落到数据库，
-        // 所以下一秒的请求就是通的。
-
-        await _audit.WriteAsync(
-            wasBound ? AuditEventType.TwoFactorRebound : AuditEventType.TwoFactorSucceeded,
-            target: user.UserName,
-            detail: wasBound
-                ? "在已绑定的情况下重新绑定了两步验证（旧设备的动态码已失效）。"
-                : "两步验证绑定完成。",
-            actor: user.UserName,
-            ct: Ct).ConfigureAwait(false);
-
-        if (wasBound)
-        {
-            // 重绑等同于换了一把钥匙：其他设备必须重新登录（保留当前会话，
-            // 否则用户看不到下面这份新的恢复码）。
-            await RevokeOtherSessionsAsync(user.Id).ConfigureAwait(false);
-        }
-
-        IEnumerable<string>? codes = await _users
-            .GenerateNewTwoFactorRecoveryCodesAsync(user, RecoveryCodeCount)
-            .ConfigureAwait(false);
-
-        return new RecoveryCodesResultDto([.. codes ?? []]);
-    }
-
-    /// <summary>
-    /// 敏感操作前的二次确认：必须提供**当前密码**。
-    /// </summary>
-    /// <remarks>
-    /// 用于"签发永久凭据"这一类操作——换恢复码、重绑验证器。它们的效果等价于
-    /// 给自己发一把永久钥匙：一个只拿到会话 Cookie 的攻击者若能调用，就能读出长期 TOTP 密钥、
-    /// 把第二因素换到自己的设备上、并作废用户手里的恢复码。而本产品没有自助恢复通道，
-    /// 合法用户会被**永久**锁在门外。
-    /// <para>
-    /// 刻意**不**调 <c>AccessFailedAsync</c>：这是一条需要已认证会话才能到达的路径，
-    /// 密码在这里是"二次确认"而不是登录凭据；把打错密码算进锁定，
-    /// 会让用户在设置页里把自己误锁。失败仍然留痕（审计 + 日志）。
-    /// </para>
-    /// </remarks>
-    /// <param name="detail">写进审计的失败原因，按调用点区分，便于事后追查是哪一步被拒。</param>
-    private async Task RequireCurrentPasswordAsync(IdentityUser<Guid> user, string? password, string detail)
-    {
-        if (await _users.CheckPasswordAsync(user, password ?? string.Empty).ConfigureAwait(false))
-        {
-            return;
-        }
-
-        await _audit.WriteAsync(
-            AuditEventType.LoginFailed,
-            target: user.UserName,
-            detail: detail,
-            actor: user.UserName,
-            ct: Ct).ConfigureAwait(false);
-
-        throw ApiException.BadRequest(ApiErrorCodes.InvalidRequest, "当前密码不正确。");
-    }
-
-    /// <summary>重新生成恢复码（**必须提供当前密码**——恢复码是绕过 TOTP 的钥匙）。</summary>
-    /// <remarks>
-    /// 要求密码而不是要求动态码：恢复码的用途正是"验证器丢了"，此时让用户提供动态码是自相矛盾的。
-    /// 而一个只有会话 Cookie 的攻击者不该能给自己签发一套永久钥匙。
-    /// （旧的那一套在生成时即全部作废，Identity 的 <c>GenerateNewTwoFactorRecoveryCodesAsync</c>
-    /// 会整体替换，不存在"新旧都能用"的窗口。）
-    /// </remarks>
-    [HttpPost("totp/recovery-codes")]
-    [EnableRateLimiting(RateLimitPolicies.Write)]
-    public async Task<RecoveryCodesResultDto> RegenerateRecoveryCodesAsync(
-        [FromBody] RecoveryCodesRequestDto input)
-    {
-        IdentityUser<Guid> user = await RequireUserAsync(_users).ConfigureAwait(false);
-
-        if (!await _users.GetTwoFactorEnabledAsync(user).ConfigureAwait(false))
-        {
-            throw ApiException.BadRequest(
-                ApiErrorCodes.TotpNotBound,
-                "尚未绑定两步验证，没有恢复码可重新生成。");
-        }
-
-        await RequireCurrentPasswordAsync(user, input.Password, "重新生成恢复码时密码校验失败。")
-            .ConfigureAwait(false);
-
-        IEnumerable<string>? codes = await _users
-            .GenerateNewTwoFactorRecoveryCodesAsync(user, RecoveryCodeCount)
-            .ConfigureAwait(false);
-
-        string[] result = [.. codes ?? []];
-
-        await _audit.WriteAsync(
-            AuditEventType.RecoveryCodesRegenerated,
-            target: user.UserName,
-            detail: $"已重新生成 {result.Length} 个恢复码，旧的恢复码全部作废。",
-            actor: user.UserName,
-            ct: Ct).ConfigureAwait(false);
-
-        _logger.LogWarning("用户 {User} 重新生成了恢复码（旧恢复码已作废）。", user.UserName);
-
-        return new RecoveryCodesResultDto(result);
     }
 
     /// <summary>改密码。成功后**全部会话（含当前）立即失效**，用户需重新登录。</summary>
@@ -618,59 +303,6 @@ public sealed class AuthController(
 
     // ------------------------------------------------------------------
 
-    /// <summary>用一次性恢复码完成登录（恢复码用掉即作废，由 Identity 保证）。</summary>
-    private async Task<LoginResultDto> CompleteRecoveryCodeLoginAsync(IdentityUser<Guid> user, string recoveryCode)
-    {
-        // RedeemTwoFactorRecoveryCodeAsync 返回的是 IdentityResult（不是 SignInResult）。
-        IdentityResult result = await _users
-            .RedeemTwoFactorRecoveryCodeAsync(user, recoveryCode)
-            .ConfigureAwait(false);
-
-        if (!result.Succeeded)
-        {
-            await AuditLoginFailedAsync(user.UserName ?? string.Empty, "恢复码无效",
-                AuditEventType.TwoFactorFailed).ConfigureAwait(false);
-
-            await _users.AccessFailedAsync(user).ConfigureAwait(false);
-
-            if (await _users.IsLockedOutAsync(user).ConfigureAwait(false))
-            {
-                throw AccountLocked(user);
-            }
-
-            // 与动态码错误一致：留在动态码/恢复码这一步，不把用户弹回登录页。
-            return new LoginResultDto
-            {
-                RequiresTotp = true,
-                Message = "恢复码无效或已被使用过。",
-            };
-        }
-
-        int remaining = await _users.CountRecoveryCodesAsync(user).ConfigureAwait(false);
-
-        await _audit.WriteAsync(
-            AuditEventType.RecoveryCodeUsed,
-            target: user.UserName,
-            detail: $"使用一次性恢复码登录，剩余 {remaining} 个。",
-            actor: user.UserName,
-            ct: Ct).ConfigureAwait(false);
-
-        // 恢复码快用完时必须提醒：它用完的那一刻，验证器再丢就彻底锁死了。
-        if (remaining <= 2)
-        {
-            _logger.LogWarning("用户 {User} 的恢复码只剩 {Count} 个，请尽快重新生成。", user.UserName, remaining);
-        }
-
-        SessionRecord record = await CreateSessionAsync(user).ConfigureAwait(false);
-
-        return new LoginResultDto
-        {
-            Authenticated = true,
-            User = BuildCurrentUser(user, record),
-            Message = remaining <= 2 ? $"恢复码只剩 {remaining} 个，请尽快重新生成。" : null,
-        };
-    }
-
     /// <summary>建会话登记 + 签发带会话 id 的 Cookie 票据。</summary>
     private async Task<SessionRecord> CreateSessionAsync(IdentityUser<Guid> user)
     {
@@ -682,8 +314,9 @@ public sealed class AuthController(
             .ConfigureAwait(false);
 
         // 会话 id 必须**写进票据**：它是对"这个 Cookie 是否已被踢出"的唯一联系
-        //（SessionValidationEvents 逐请求按它查登记表）。SignInWithClaimsAsync 是
-        // 在不改 Identity 的用户声明工厂的前提下唯一能做到这件事的入口。
+        //（SessionValidationEvents 逐请求按它查登记表）。本仓库不注册自定义
+        // IUserClaimsPrincipalFactory（原先那个只为附加 TOTP claim 而存在，已随 TOTP 删除），
+        // 所以 SignInWithClaimsAsync 是附加这个 claim 的入口。
         var properties = new Microsoft.AspNetCore.Authentication.AuthenticationProperties
         {
             IsPersistent = true,
@@ -714,26 +347,10 @@ public sealed class AuthController(
         return record;
     }
 
-    /// <summary>失绑其他会话（保留当前会话）。重绑 TOTP 时用。</summary>
-    private async Task RevokeOtherSessionsAsync(Guid userId)
-    {
-        string? current = CurrentSessionId;
-
-        foreach (SessionRecord session in _sessions.List(userId))
-        {
-            if (!string.Equals(session.Id, current, StringComparison.Ordinal))
-            {
-                await _sessions.RevokeAsync(userId, session.Id, Ct).ConfigureAwait(false);
-            }
-        }
-    }
-
     private CurrentUserDto BuildCurrentUser(IdentityUser<Guid> user, SessionRecord? record) => new()
     {
         Id = user.Id,
         Username = user.UserName ?? string.Empty,
-        TotpEnabled = user.TwoFactorEnabled,
-        TwoFactorConfirmed = user.TwoFactorEnabled,
 
         // Identity 不保存"上次登录"历史。这里给的是**本会话**的建立时间与来源 IP——
         // 它是用户点进设置页时真正想确认的东西（"现在这次是谁、从哪登的"）。
@@ -745,12 +362,9 @@ public sealed class AuthController(
     /// <summary>
     /// 记一次失败并算出"还剩几次"；已因这次失败被锁定时直接抛 <c>ACCOUNT_LOCKED</c>。
     /// </summary>
-    private async Task<ApiException> RegisterFailureAsync(
-        IdentityUser<Guid> user,
-        AuditEventType auditType,
-        string reason)
+    private async Task<ApiException> RegisterFailureAsync(IdentityUser<Guid> user, string reason)
     {
-        await AuditLoginFailedAsync(user.UserName ?? string.Empty, reason, auditType).ConfigureAwait(false);
+        await AuditLoginFailedAsync(user.UserName ?? string.Empty, reason).ConfigureAwait(false);
 
         IdentityResult failed = await _users.AccessFailedAsync(user).ConfigureAwait(false);
         if (!failed.Succeeded)
@@ -766,15 +380,14 @@ public sealed class AuthController(
         int limit = _lockout.MaxFailedAttempts;
         int used = await _users.GetAccessFailedCountAsync(user).ConfigureAwait(false);
 
-        // **响应体里不能带"还剩几次"**。用户名不存在的路径没有这个计数（detail 为 null），
-        // 所以带上它等于替攻击者确认"这个用户名存在"——而且顺手把锁定阈值与时长也告诉了他。
+        // **响应体里不带"还剩几次"**：那等于把锁定阈值与时长直接告诉攻击者。
         // 剩余次数只写日志，不交给调用方。
         _logger.LogInformation(
-            "用户 {User} 登录失败，已连续失败 {Used}/{Limit} 次。", user.UserName, used, limit);
+            "登录失败，已连续失败 {Used}/{Limit} 次。", used, limit);
 
         return ApiException.Unauthorized(
             ApiErrorCodes.LoginFailed,
-            "用户名或密码不正确。");
+            "密码不正确。");
     }
 
     private ApiException AccountLocked(IdentityUser<Guid> user) =>
@@ -783,22 +396,13 @@ public sealed class AuthController(
             $"账户已被临时锁定，请在 {_lockout.Minutes} 分钟后重试。",
             "连续登录失败次数过多触发了锁定。锁定由 ASP.NET Core Identity 维护，重启服务不会解除。");
 
-    private Task AuditLoginFailedAsync(string userName, string reason, AuditEventType type = AuditEventType.LoginFailed) =>
+    private Task AuditLoginFailedAsync(string userName, string reason) =>
         _audit.WriteAsync(
-            type,
+            AuditEventType.LoginFailed,
             target: userName,
             detail: reason,
             actor: userName,
             ct: Ct);
-
-    /// <summary>
-    /// 只用于给"用户名不存在"那条路径制造一次**等价的口令哈希开销**（见 <c>LoginAsync</c>）。
-    /// </summary>
-    /// <remarks>
-    /// 这里只调 <c>HashPassword</c> 消耗与 <c>CheckPasswordAsync</c> 同级的时间，
-    /// **不比对结果**，所以给哪个用户对象都行——它的 Id 没有任何含义。
-    /// </remarks>
-    private static readonly IdentityUser<Guid> TimingEqualizerUser = new() { Id = Guid.Empty };
 
     /// <summary>Identity 的密码错误 → 稳定 code。策略类错误与非策略类错误的处置完全不同。</summary>
     private static ApiException MapPasswordFailure(IdentityResult result)
@@ -823,39 +427,4 @@ public sealed class AuthController(
 
     private static string Describe(IdentityResult result) =>
         string.Join("；", result.Errors.Select(e => $"[{e.Code}] {e.Description}"));
-
-    /// <summary>Base32 密钥按 4 个一组分组显示（与 Identity 管理页一致，方便手抄）。</summary>
-    private static string FormatKey(string unformattedKey)
-    {
-        var sb = new StringBuilder();
-        int index = 0;
-
-        while (index + 4 < unformattedKey.Length)
-        {
-            sb.Append(unformattedKey, index, 4).Append(' ');
-            index += 4;
-        }
-
-        if (index < unformattedKey.Length)
-        {
-            sb.Append(unformattedKey, index, unformattedKey.Length - index);
-        }
-
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// 组装 <c>otpauth://</c> URI（验证器扫码/手输都用它）。
-    /// </summary>
-    /// <remarks>
-    /// 参数值一律 <c>EscapeDataString</c>：密钥与用户名都可能含 <c>+</c> <c>/</c> <c>=</c>
-    /// 这些在 URI 里有特殊含义的字符，不转义会让验证器解析出错误的条目名甚至错误的密钥。
-    /// </remarks>
-    private static string BuildAuthenticatorUri(string accountName, string unformattedKey) =>
-        string.Format(
-            CultureInfo.InvariantCulture,
-            "otpauth://totp/{0}:{1}?secret={2}&issuer={0}&digits=6&period=30",
-            Uri.EscapeDataString(Issuer),
-            Uri.EscapeDataString(accountName),
-            Uri.EscapeDataString(unformattedKey));
 }

@@ -33,14 +33,14 @@ onBeforeUnmount(() => {
   unwatchSystem?.()
 })
 
-/** 已登录且已完成 TOTP 绑定 → 启动实时通道 */
+/** 已登录 → 启动实时通道 */
 watch(
-  () => [auth.isAuthenticated, auth.mustBindTotp] as const,
-  async ([isAuth, mustBind]) => {
-    if (isAuth && !mustBind) {
+  () => auth.isAuthenticated,
+  async (isAuth) => {
+    if (isAuth) {
       tasks.wireRealtime()
       await realtime.start()
-    } else if (!isAuth) {
+    } else {
       await realtime.stop()
     }
   },

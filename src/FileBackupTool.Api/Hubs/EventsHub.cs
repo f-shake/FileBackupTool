@@ -10,9 +10,7 @@ namespace FileBackupTool.Api.Hubs;
 /// <para>
 /// <b>必须认证</b>：Hub 是业务数据的实时通道（进度、日志、监控状态、快照提交），
 /// 匿名能连等于绕过 REST 的鉴权。因此类上带 <c>[Authorize]</c>，
-/// 并且 <c>TotpRequiredMiddleware</c> 把 <c>/hubs/**</c> 也纳入 TOTP 闸门——
-/// 未绑定两步验证的用户连不上 Hub，前端会因此降级为轮询，而轮询同样被 403 挡住，
-/// 行为一致地停在绑定页。
+/// 未登录时 negotiate 会失败，前端据此降级为轮询，而轮询同样被 401 挡住，行为一致。
 /// </para>
 /// <para>
 /// <b>为什么用 Cookie 认证而不是 access_token 查询串</b>：SignalR 的

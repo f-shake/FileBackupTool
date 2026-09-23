@@ -97,9 +97,6 @@ public sealed class SecurityOptions
 {
     public const string SectionName = "Security";
 
-    /// <summary>强制 TOTP。未绑定前不能访问任何业务功能。</summary>
-    public bool RequireConfirmedTwoFactor { get; set; } = true;
-
     public int CookieSlidingDays { get; set; } = 7;
 
     public int CookieAbsoluteDays { get; set; } = 30;
@@ -112,6 +109,18 @@ public sealed class SecurityOptions
 
     /// <summary>初始账号名（密码必须由环境变量提供，不写死在文件里）。</summary>
     public string SeedUserName { get; set; } = "admin";
+
+    /// <summary>
+    /// 实际生效的账号名：<see cref="SeedUserName"/> 为空或纯空白时回落到 <c>admin</c>。
+    /// </summary>
+    /// <remarks>
+    /// 播种（<c>IdentitySeeder</c>）与登录（<c>AuthController</c>）**必须用同一个值**。
+    /// 早先两处各自兜底，一旦有人把配置写成空串就会漂移：播种建的是 "admin"、
+    /// 登录按空串查 → 恒定 401，而现象是"密码明明对却登不上"。
+    /// 单密码模式下账号名不再由用户输入，这个值就是唯一的账号来源。
+    /// </remarks>
+    public string EffectiveSeedUserName =>
+        string.IsNullOrWhiteSpace(SeedUserName) ? "admin" : SeedUserName;
 
     /// <summary>提供初始密码的环境变量名。</summary>
     public string SeedPasswordEnvironmentVariable { get; set; } = "FILEBACKUPTOOL_ADMIN_PASSWORD";

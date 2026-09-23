@@ -193,39 +193,10 @@ const routes: { method: string; pattern: RegExp; handler: (m: RegExpMatchArray, 
   {
     method: 'post',
     pattern: /^\/auth\/login$/,
-    handler: () => ({
-      requiresTotp: false,
-      requiresTotpSetup: false,
-      authenticated: true,
-      user: mockUser,
-      message: null,
-    }),
+    handler: () => mockUser,
   },
   { method: 'post', pattern: /^\/auth\/logout$/, handler: () => null },
   { method: 'get', pattern: /^\/auth\/me$/, handler: () => mockUser },
-  {
-    method: 'post',
-    pattern: /^\/auth\/totp\/setup$/,
-    handler: () => ({
-      sharedKey: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
-      authenticatorUri: 'otpauth://totp/FileBackupTool:admin?secret=JBSWY3DPEHPK3PXP&issuer=FileBackupTool',
-      qrCodePngBase64: null,
-    }),
-  },
-  {
-    method: 'post',
-    pattern: /^\/auth\/totp\/confirm$/,
-    handler: () => ({
-      recoveryCodes: Array.from({ length: 10 }, (_, i) => `RC-${hashOf(`rc${i}`).slice(0, 4).toUpperCase()}-${hashOf(`rcb${i}`).slice(0, 4).toUpperCase()}`),
-    }),
-  },
-  {
-    method: 'post',
-    pattern: /^\/auth\/totp\/recovery-codes$/,
-    handler: () => ({
-      recoveryCodes: Array.from({ length: 10 }, (_, i) => `RC-NEW${i}-${hashOf(`nrc${i}`).slice(0, 4).toUpperCase()}`),
-    }),
-  },
   { method: 'post', pattern: /^\/auth\/password$/, handler: () => null },
   { method: 'get', pattern: /^\/auth\/sessions$/, handler: () => mockSessions },
   { method: 'delete', pattern: /^\/auth\/sessions\/([^/]+)$/, handler: () => null },

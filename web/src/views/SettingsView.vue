@@ -4,7 +4,7 @@
  *
  * 四块：
  *   通用（数据目录 / 日志 / 磁盘占用 + 自动备份总开关 + 失败率阈值）
- *   安全（改密码 / TOTP / 恢复码 / 会话列表）
+ *   安全（改密码 / 会话列表）
  *   还原根白名单（**硬约束**，还原绝不接受白名单之外的路径）
  *   保留策略（默认全手动；开启时必须二次确认）
  */
@@ -16,7 +16,6 @@ import type { AppSettings, NormalizedApiError, ServerInfo, SessionInfo } from '@
 import ErrorState from '@/components/ErrorState.vue'
 import PathText from '@/components/PathText.vue'
 import StatePlaceholder from '@/components/StatePlaceholder.vue'
-import RecoveryCodesDialog from '@/components/RecoveryCodesDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { formatBytes, formatCount } from '@/utils/format'
 import { formatDateTime } from '@/utils/datetime'
@@ -180,36 +179,6 @@ async function submitPassword(): Promise<void> {
     pwdError.value = asApiError(err)
   } finally {
     pwdSaving.value = false
-  }
-}
-
-/* --- 恢复码 --- */
-const codesVisible = ref(false)
-const codes = ref<string[]>([])
-const codesTitle = ref('恢复码')
-const regenVisible = ref(false)
-const regenPassword = ref('')
-const regenWorking = ref(false)
-const regenError = ref<NormalizedApiError | null>(null)
-
-function openRegen(): void {
-  regenPassword.value = ''
-  regenError.value = null
-  regenVisible.value = true
-}
-
-async function submitRegen(): Promise<void> {
-  regenWorking.value = true
-  regenError.value = null
-  try {
-    codes.value = await auth.regenerateRecoveryCodes(regenPassword.value)
-    codesTitle.value = '新的恢复码'
-    regenVisible.value = false
-    codesVisible.value = true
-  } catch (err) {
-    regenError.value = asApiError(err)
-  } finally {
-    regenWorking.value = false
   }
 }
 
@@ -447,27 +416,21 @@ onMounted(() => {
             <el-descriptions-item label="用户名">
               <span class="fbt-mono">{{ me?.username ?? '—' }}</span>
             </el-descriptions-item>
-            <el-descriptions-item label="TOTP 两步验证">
-              <el-tag :type="me?.totpEnabled ? 'success' : 'danger'" size="small">
-                {{ me?.totpEnabled ? '已绑定' : '未绑定' }}
-              </el-tag>
-              <el-tag v-if="me && !me.twoFactorConfirmed" type="warning" size="small" class="settings__tag">
-                未确认（功能被锁定）
-              </el-tag>
-            </el-descriptions-item>
-            <el-descriptions-item label="上次登录时间">
+            <el-descriptions-item label="本次登录时间">
               <span class="fbt-mono">
                 {{ me?.lastLoginTime ? formatDateTime(me.lastLoginTime) : '—' }}
               </span>
             </el-descriptions-item>
-            <el-descriptions-item label="上次登录 IP">
+            <el-descriptions-item label="本次登录 IP">
               <span class="fbt-mono">{{ me?.lastLoginIp ?? '—' }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="登录方式">
+              <span>单密码 + Cookie 会话</span>
             </el-descriptions-item>
           </el-descriptions>
 
           <div class="settings__actions">
             <el-button size="small" @click="openPassword">修改密码</el-button>
-            <el-button size="small" @click="openRegen">重新生成恢复码</el-button>
           </div>
         </div>
 
@@ -535,29 +498,6 @@ onMounted(() => {
         <el-button type="primary" :loading="pwdSaving" @click="submitPassword">确认修改</el-button>
       </template>
     </el-dialog>
-
-    <!-- 重新生成恢复码 -->
-    <el-dialog v-model="regenVisible" title="重新生成恢复码" width="440px">
-      <ErrorState v-if="regenError" :error="regenError" compact class="fbt-section" />
-      <el-alert
-        type="warning"
-        :closable="false"
-        show-icon
-        title="旧的恢复码会立即全部失效。"
-        class="fbt-section"
-      />
-      <el-form label-width="90px">
-        <el-form-item label="当前密码">
-          <el-input v-model="regenPassword" type="password" show-password autocomplete="current-password" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="regenVisible = false">取消</el-button>
-        <el-button type="primary" :loading="regenWorking" @click="submitRegen">生成</el-button>
-      </template>
-    </el-dialog>
-
-    <RecoveryCodesDialog v-model="codesVisible" :codes="codes" :title="codesTitle" />
   </div>
 </template>
 
@@ -588,9 +528,5 @@ onMounted(() => {
 .settings__actions {
   display: flex;
   gap: 8px;
-}
-
-.settings__tag {
-  margin-left: 6px;
 }
 </style>

@@ -1,8 +1,7 @@
 /**
  * 认证状态（05 §2）。
  *
- * 关键约束：**未绑定 TOTP 前不能访问任何业务功能**。
- * 因此 store 暴露 `mustBindTotp`，由路由守卫强制跳到登录页的绑定步骤。
+ * 单密码模式：登录成功即已认证，没有"密码对了但还不能进"的中间态。
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
@@ -14,7 +13,6 @@ import type {
   LoginRequest,
   NormalizedApiError,
   SessionInfo,
-  TotpSetupResult,
 } from '@/api/types'
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated' | 'error'
@@ -25,10 +23,6 @@ export const useAuthStore = defineStore('auth', () => {
   const error = ref<NormalizedApiError | null>(null)
 
   const isAuthenticated = computed(() => status.value === 'authenticated' && user.value !== null)
-  /** 已登录但尚未完成 TOTP 绑定 —— 必须走绑定流程 */
-  const mustBindTotp = computed(
-    () => isAuthenticated.value && user.value !== null && !user.value.twoFactorConfirmed,
-  )
 
   async function bootstrap(): Promise<void> {
     status.value = 'unknown'
@@ -92,14 +86,27 @@ export const useAuthStore = defineStore('auth', () => {
     status.value = 'unauthenticated'
   }
 
-  /** 登录（可能只走完第一步，需要 TOTP） */
-  async function login(request: LoginRequest) {
+  /** 登录（单密码：成功即已认证） */
+  async function login(request: LoginRequest): Promise<CurrentUser> {
     const result = await authApi.login(request)
-    if (result.authenticated) {
-      user.value = result.user ?? null
-      status.value = 'authenticated'
-      if (!user.value) await bootstrap()
+
+    // 200 但没有响应体（网关吞 body、后端将来改 204 等）时**不能**置为已认证：
+    // 那样 LoginView 会先弹"登录成功"，路由守卫随即把用户弹回登录页，而 error 始终为 null——
+    // 用户看到的是"提示成功、然后原地回到登录页"，没有任何可自诊断的信息。
+    // 宁可在这里明确失败。（原先靠 `if (!user.value) await bootstrap()` 兜住这一点，那个兜底随
+    // 两步登录一起被删了，这里用更直接的方式重建。）
+    if (!result) {
+      const empty: NormalizedApiError = {
+        status: 0,
+        code: 'EMPTY_LOGIN_RESPONSE',
+        message: '登录响应为空，请重试。',
+        backendUnavailable: false,
+      }
+      throw empty
     }
+
+    user.value = result
+    status.value = 'authenticated'
     return result
   }
 
@@ -112,28 +119,7 @@ export const useAuthStore = defineStore('auth', () => {
     setUnauthenticated()
   }
 
-  async function refreshUser(): Promise<void> {
-    user.value = await authApi.getCurrentUser()
-    status.value = 'authenticated'
-  }
-
-  /* ------------------------- TOTP 强制绑定 ------------------------- */
-
-  /** `password` 只在已绑定状态下的重绑时必填（见 `api/auth.ts` 的说明）。 */
-  async function setupTotp(password?: string): Promise<TotpSetupResult> {
-    return authApi.setupTotp(password)
-  }
-
-  async function confirmTotp(code: string, password?: string): Promise<string[]> {
-    const result = await authApi.confirmTotp(code, password)
-    await refreshUser()
-    return result.recoveryCodes
-  }
-
-  async function regenerateRecoveryCodes(password: string): Promise<string[]> {
-    const result = await authApi.regenerateRecoveryCodes(password)
-    return result.recoveryCodes
-  }
+  /* ------------------------- 密码与会话 ------------------------- */
 
   async function changePassword(body: ChangePasswordRequest): Promise<void> {
     // 改密码会靠 Identity 安全戳一次性失效全部会话（05 §3）
@@ -161,17 +147,12 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     error,
     isAuthenticated,
-    mustBindTotp,
     bootstrap,
     ensureBootstrapped,
     setUnauthenticated,
     installUnauthorizedHandler,
     login,
     logout,
-    refreshUser,
-    setupTotp,
-    confirmTotp,
-    regenerateRecoveryCodes,
     changePassword,
     listSessions,
     revokeSession,
