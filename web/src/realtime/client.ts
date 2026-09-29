@@ -35,7 +35,9 @@ export const MAX_CONSECUTIVE_FAILURES = 3
 /** 轮询间隔（毫秒） */
 const POLL_INTERVAL_MS = Number(import.meta.env.VITE_POLL_INTERVAL_MS || 5000)
 
-const HUB_PATH = import.meta.env.VITE_HUB_PATH || '/hubs/events'
+// 同 API_BASE：默认从 BASE_URL 派生，根路径下就是 '/hubs/events'，
+// 挂在 /backup/ 下就是 '/backup/hubs/events'。
+const HUB_PATH = import.meta.env.VITE_HUB_PATH || `${import.meta.env.BASE_URL}hubs/events`
 
 /** 服务端订阅方法名。06 只说了「订阅 task:{taskId} 分组」，未约定方法名——集中在此处便于对齐。 */
 const METHOD_SUBSCRIBE_TASK = 'SubscribeTask'

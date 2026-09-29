@@ -96,7 +96,14 @@ const routes: RouteRecordRaw[] = [
 ]
 
 export const router = createRouter({
-  history: createWebHistory(),
+  // 用 Vite 内置的 BASE_URL，而不是自己去读 VITE_BASE。
+  //
+  // BASE_URL 由 vite.config.ts 的 `base` 直接派生（且总以 / 结尾），所以
+  // "构建配置里的 base"与"客户端路由的 base"**结构上不可能不一致**。
+  // 早先的写法是两处各自读一次 VITE_BASE——那会在"某个 .env 文件提供了 VITE_BASE、
+  // 而构建时环境里又没有这个变量"时错配成 base='/' 而路由 base='/foo'，
+  // 症状是资源能加载、一挂载路由就白屏。改成一个来源之后这类错配不存在了。
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes,
   scrollBehavior(_to, _from, saved) {
     return saved ?? { top: 0 }

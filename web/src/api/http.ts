@@ -7,7 +7,10 @@ import axios, {
 import type { ApiErrorBody, NormalizedApiError } from './types'
 
 /** REST 基础路径。由 Vite 代理到后端（开发期）。 */
-export const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+// 默认值从 BASE_URL 派生：根路径下就是 '/api'，挂在 /backup/ 下就是 '/backup/api'。
+// 这样接口路径与构建期的 base 天然一致，不需要构建脚本额外注入。
+// VITE_API_BASE 只在需要"接口与页面不同源"时才用。
+export const API_BASE = import.meta.env.VITE_API_BASE || `${import.meta.env.BASE_URL}api`
 
 /** 是否启用 Mock 层。默认关闭（VITE_USE_MOCK 未设置即为关闭）。 */
 export const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true'

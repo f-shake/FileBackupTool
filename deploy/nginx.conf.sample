@@ -1,0 +1,107 @@
+# =============================================================================
+# FileBackupTool · nginx 配置样例（**本机自己终止 TLS** 形态）
+#
+# 适用条件（先确认是这一种，再抄）：
+#   · 域名与证书都在**本机**，本机 nginx 直接对公网提供 https；
+#   · 应用挂在**根路径**。
+#
+# 另一种形态（本机 nginx 只是内层一跳、外层公网服务器终止 TLS、且要挂在子路径）
+# 用同目录的 **nginx-subpath.sample.conf**，不要用这一份——
+# 两份的转发头写法**必须不同**，抄错不是"少一层防护"，而是静默降级。
+#
+# 对应设计文档 01 §7.2 与 05 §6：nginx 终止 TLS，Kestrel 只监听 localhost。
+#
+# 它**不是**可以直接 include 的完整配置，而是一个 server 块——请按你的实际情况
+# 改 server_name / 证书路径 / 端口，然后放进 nginx 的 http {} 里。
+#
+# ⚠ 直接把这份文件拷成生产配置是不行的：证书路径、域名、后端端口都必须改。
+# =============================================================================
+
+# SignalR 需要 WebSocket 升级。这个 map 必须在 http {} 层级（server 之外），
+# 所以它单独列在这里。
+# 作用：客户端带 Upgrade 头时转发 Upgrade + Connection: upgrade，
+#       否则发 Connection: close（给不带 Upgrade 的普通请求一个明确的"不升级"）。
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen      443 ssl;
+    listen      [::]:443 ssl;
+    http2       on;
+    server_name backup.example.com;          # ← 改成你的域名
+
+    ssl_certificate     C:/certs/fullchain.pem;   # ← 改成你的证书
+    ssl_certificate_key C:/certs/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    # 本应用没有大文件上传（所有文件都留在服务器上，不提供打包下载），
+    # 所以请求体可以设得很小。默认的 1m 也够，这里显式写出来是为了避免
+    # 有人为了"保险"把它调成 1g——那只是给攻击者多一个可用的入口。
+    client_max_body_size 4m;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;    # ← 改成本程序 Kestrel 的端口
+        proxy_http_version 1.1;
+
+        # ---- 05 §6.1 ①②：转发头。缺了这两行，应用看到的来源 IP 全是 127.0.0.1，
+        #      于是登录限流退化成"所有人共用一份 5 次/5 分钟"的配额。
+        #
+        #      这一份是**本机直接面对客户端**的形态（只有一跳），所以用
+        #      $proxy_add_x_forwarded_for / $scheme 是正确的：本机 nginx 就是
+        #      唯一的代理，它写进去的就是真实客户端 IP 与真实 scheme。
+        #      （若是"外层服务器 → 本机 nginx"的两跳形态，这里必须改成透传，
+        #       见 nginx-subpath.sample.conf 里的说明。）
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 顺带把 Host 也转过去。应用不做基于 Host 的逻辑，但 nginx 的
+        # 默认值会把 Host 换成 proxy_pass 里的名字（127.0.0.1:5000），
+        # 排查问题时日志里全是内网地址会很难看。
+        proxy_set_header Host              $host;
+
+        # ---- 05 §6.2：SignalR 的 WebSocket 升级。
+        #      少了 Upgrade/Connection 这两行，实时通道会静默降级成轮询——
+        #      功能还在，但"实时"不再是实时的，而且不报错。
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # SignalR 长连接不能被缓冲，否则事件要等到缓冲填满才送达。
+        proxy_buffering off;
+
+        # 长连接的超时。默认 60s 会把空闲的 WebSocket 掐断，
+        # 症状是"页面开着不动，过一会儿顶栏徽章从实时变成轮询"。
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # ---- 05 §6.1 ④：HSTS 由应用下发，nginx 侧透传，**不要**在这里重复 add_header。
+    #      两处都加会出现两个不同 max-age 的头，行为取决于浏览器，
+    #      而且以后想调整时你只会改一处，另一处变成幽灵配置。
+
+    # 安全响应头里能由 nginx 加的部分（应用没有管这些）：
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options        DENY    always;
+    add_header Referrer-Policy        no-referrer always;
+}
+
+# ---- 05 §6.1 ③：http → https 的跳转放在这里。
+#      应用**没有**启用 UseHttpsRedirection：反代之后应用看到的 scheme 是 http，
+#      若在应用里无条件重定向到 https，nginx 再转发回来又会重定向——死循环。
+#      所以这件事由 nginx 做。
+server {
+    listen      80;
+    listen      [::]:80;
+    server_name backup.example.com;          # ← 改成你的域名
+
+    # 如果你的证书是用 http-01 方式签发的，别把 /.well-known/ 也跳走。
+    location ^~ /.well-known/acme-challenge/ {
+        root C:/inetpub/acme;                # ← 改成你的 webroot
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}

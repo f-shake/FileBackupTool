@@ -109,7 +109,30 @@ public sealed class MonitorHookTests
 
         await TestWait.UntilAsync(() => h.Status(taskId).DroppedEventCount >= 1);
 
-        await h.PumpAsync();
+        // 这里**不能**只 pump 一次。
+        //
+        // 计数与标志不在同一步：ChangeMonitor.OnBackpressure 里先 foreach 找到本根并
+        // NoteBackpressure()（加每根计数——上面等的就是它），**再**判
+        // `totalCount >= QueueBackpressureThreshold`，然后**在另一个 foreach 里**
+        // RequestBackpressureFullScan()（置幂等标志）。两者之间隔着一次阈值判断和一轮循环。
+        //
+        // 测试线程不让出时间片的话，投递线程可能还没走到置标志那一步，这一次 PumpAsync
+        // 就已经消费完这一轮，于是它什么也没排出来，下面的 Assert.Single 拿到空集合。
+        //
+        // 频率如实说：跑**整个套件**时偶发（本会话共观察到 3 次），单独跑这个类不复现；
+        // 专门做过 A/B 对照（旧写法连跑 24 次）也**没能复现**。所以这是"窗口在代码里
+        // 确定存在、但触发条件尚未查明"的推断性修复，不是已证实的修复——
+        // 详见 docs/plans/09-实现期修订.md §O1。
+        //
+        // 产品侧不会漏：标志是幂等的，下一轮消费必然排上（ChangeMonitor.OnBackpressure
+        // 的注释写的就是"真正的扫描排程由单消费者在下一轮完成"）。所以这里等到
+        // "请求真的排上了"再断言——断言本身没有放宽（反压仍必须转化为一次全量扫描），
+        // 只是不再依赖"那一轮恰好领先于投递线程"这个时间巧合。
+        for (int i = 0; i < 40 && h.Trigger.Requests.Count == 0; i++)
+        {
+            await TestWait.SchedulingYieldAsync(5);
+            await h.PumpAsync();
+        }
 
         TriggeredScan scan = Assert.Single(h.Trigger.Requests);
         Assert.True(scan.IsFullScan, "队列反压意味着事件可能已经丢了，必须排全量扫描。");

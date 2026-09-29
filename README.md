@@ -107,6 +107,37 @@ dotnet test tests\FileBackupTool.IntegrationTests
 dotnet ef migrations add <Name> -p src\FileBackupTool.Data -o Migrations
 ```
 
+### 一键发布（生产部署）
+
+```powershell
+.\publish.ps1 -Zip        # 在开发机上跑
+```
+
+它会依次：跑单元 + 集成测试 → `npm ci` + 构建前端 → 产物拷进 `wwwroot` → `dotnet publish`
+→ 附加部署件 → 打包。产出 `publish/`（已在 `.gitignore` 里）与同名 zip。
+
+- **自包含 + 单文件**：105 MB 一个 exe，生产机不需要装 .NET、Node 或任何运行时。
+  留在 exe 外面的只有 `e_sqlite3.dll` 这类原生库（它们本来就无法打包）。
+- 整个 `publish/` 拷到生产机，在**那个目录里**以管理员身份跑
+  `.\install-service.ps1 -ServiceAccount '<能读写备份源与数据目录的账号>'`
+  即可注册并启动 Windows 服务（用 [nssm](https://nssm.cc/download)），
+  脚本会自己探活验证服务真的起来了。
+- 同目录带**两份** nginx 样例，按拓扑选一份（两份的转发头写法**必须不同**，
+  抄错不是"少一层防护"而是静默降级：限流退化成全站共用配额、实时通道变成轮询）：
+  `nginx.conf.sample` = 本机自己终止 TLS、应用挂根路径；
+  `nginx-subpath.sample.conf` = 本机只是内层一跳、应用挂子路径。
+  另带 `appsettings.Production.json.template`。生产配置**已存在就绝不覆盖**，
+  重跑安装脚本不会动它，要重建得显式 `-Force`。
+- 要挂在子路径下（如 `/backup/`）用 `.\publish.ps1 -PathBase /backup`：
+  这只是**前端构建期**的开关，后端与二进制不受影响，所以换目录时只需要替换
+  `wwwroot\`。两份 nginx 样例的适用范围见 [09 §P](docs/plans/09-实现期修订.md)。
+- 发布参数（自包含 / 单文件 / 关预压缩）与设计文档 08 §4.1 的偏离、
+  以及各项的**验证状态**记在 [09 §N](docs/plans/09-实现期修订.md)。
+
+> ⚠️ `install-service.ps1` 里 "nssm 注册" 那一段**尚未在真实环境验证过**
+> （开发机没装 nssm、也没提权）。脚本失败时会打印服务状态与日志尾部再退出，
+> 所以第一次在生产机上跑请盯着输出看。
+
 ## 首次运行的几步
 
 1. 放置 `appsettings.json`，配置 `DataDir`、连接串、`ReverseProxy:TrustedProxies`。
