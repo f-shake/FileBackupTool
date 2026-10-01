@@ -58,7 +58,7 @@ FileBackupTool/
 ## 环境要求
 
 - .NET SDK **10.0.4xx**（`dotnet --version`）
-- Node.js **20+**（仅前端构建需要）
+- Node.js **22.12+**（仅前端构建与前端单元测试需要；下限来自 vitest 5）
 
 ## 构建与运行
 

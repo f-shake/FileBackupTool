@@ -59,7 +59,7 @@
     默认 Release。**不要**用 Debug 发生产。
 
 .PARAMETER SkipTests
-    跳过 dotnet test。不建议：集成测试是设计文档 08 §1.1 的 CI 硬门槛。
+    跳过全部测试（dotnet test 与前端 vitest）。不建议：集成测试是设计文档 08 §1.1 的 CI 硬门槛。
 
 .PARAMETER SkipWeb
     跳过前端构建，直接用手头 wwwroot 里已有的产物。只有在你确信它是最新时才用。
@@ -182,7 +182,7 @@ Write-Ok "dotnet $(dotnet --version)"
 if (-not $SkipWeb) {
     foreach ($exe in @('node', 'npm')) {
         if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
-            Stop-Fail "找不到 $exe。构建前端需要 Node.js 20+；若 wwwroot 已是最新，可用 -SkipWeb 跳过。"
+            Stop-Fail "找不到 $exe。构建前端需要 Node.js 22.12+（vitest 5 的下限）；若 wwwroot 已是最新，可用 -SkipWeb 跳过。"
         }
     }
     Write-Ok "node $(node --version)"
@@ -297,6 +297,9 @@ if ($SkipWeb) {
         Stop-Fail 'wwwroot\index.html 不存在，而 -SkipWeb 又跳过了构建。这样出来的包里没有前端。'
     }
     Write-Warn2 '直接沿用了 wwwroot 里已有的产物，它不一定是最新的。'
+    # 前端单元测试挂在构建步骤里，跳过构建就一并跳过了——必须说出来，
+    # 否则就是"以为测过了、其实没测"的半跳过状态。
+    Write-Warn2 '前端单元测试（vitest）也一并跳过。'
 } else {
     Write-Step '2/6 前端构建'
     $nodeModules = 'web\node_modules'
@@ -324,6 +327,17 @@ if ($SkipWeb) {
         $prefix = '/' + $PathBase.Trim('/')     # 'backup' / '/backup/' → '/backup'
         $env:VITE_BASE = "$prefix/"
         Write-Ok "路径前缀 $prefix/（资源、接口、Hub 都跟着它走）"
+    }
+
+    # 前端单元测试放在构建**之前**：筛选项那类"形状写错"的缺陷在界面上完全看不出来
+    # （配了规则却不生效），只有这一层能拦住它。失败即非 0 退出，不产出半成品包。
+    #
+    # 与后端测试共用 -SkipTests：它们都是"测试"，一个开关管一处，避免出现
+    # "跳过了后端、忘了前端"的半跳过状态。
+    if ($SkipTests) {
+        Write-Warn2 '跳过前端单元测试（-SkipTests）。'
+    } else {
+        Invoke-Native 'npm' @('--prefix', 'web', 'run', 'test') '前端单元测试'
     }
 
     # build = type-check + vite build。类型错误会让它非 0 退出，正是我们要的：

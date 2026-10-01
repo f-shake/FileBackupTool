@@ -138,7 +138,7 @@ export interface BackupTask {
   sourceDir: string
   /** 备份文件存放目录（绝对路径），全局唯一 */
   backupDir: string
-  /** 序列化的筛选规则（FileFilterRule 语法） */
+  /** 序列化的筛选规则。库里存的是 `FilterRuleSetJson` 的扁平形状，见本文件末尾的说明。 */
   filterJson: string | null
 
   /** 是否启用定时备份 */
@@ -829,21 +829,48 @@ export interface FilterTestResult {
 export interface FilterRuleGroup {
   /** 匹配文件名（含扩展名） */
   file: string
-  /** 匹配文件夹名 */
+  /**
+   * 匹配文件夹名：把路径逐段拆开，**每一级目录名**分别整串匹配。
+   * 注意包含源目录之上的祖先目录名。
+   */
   folder: string
-  /** 匹配相对路径 */
+  /**
+   * 匹配**完整路径**（绝对路径）的整串。
+   * 实现（FzLib `FileFilterHelper`）会把路径与模式里的 `\` 都换成 `/` 再比，
+   * 所以 Windows 写法照常可用；但它**不是**相对源目录的路径。
+   */
   path: string
 }
 
 /**
- * `BackupTask.FilterJson` 的解析后形状。
- * 沿用旧 `FileFilterRule` 的语义：白名单限定范围，黑名单排除，黑名单优先。
+ * 编辑器使用的**界面模型**（白名单/黑名单 × 文件/文件夹/路径）。
+ * 它不是 `BackupTask.FilterJson` 的存储形状——两者由 `@/utils/filter` 互转。
  */
 export interface FileFilterRule {
   whitelist: FilterRuleGroup
   blacklist: FilterRuleGroup
   /** 各条条件是否按正则解释，而非通配符 */
   useRegex: boolean
+}
+
+/**
+ * `BackupTask.FilterJson` **在库里的实际形状**，与后端
+ * `FileBackupTool.Core.Filtering.FilterRuleSet` 逐字对应（FzLib `FileFilterRule` 的序列化形式）。
+ *
+ * ⚠️ 字段名是 **PascalCase**，且每个字段的值是**多行文本**（条件之间用 CRLF 分隔，
+ * 不是 JSON 数组）。曾经前端存的是 `{whitelist,blacklist,useRegex}` 的嵌套形状，
+ * 后端认不出、`FromJson` 静默退化为"不过滤"——界面里配的规则被整体忽略。
+ * 改动这里必须同步 `web/src/utils/filter.ts` 的往返测试。
+ */
+export interface FilterRuleSetJson {
+  IsEnabled: boolean
+  UseRegex: boolean
+  IncludeFiles: string
+  IncludeFolders: string
+  IncludePaths: string
+  ExcludeFiles: string
+  ExcludeFolders: string
+  ExcludePaths: string
 }
 
 /* ------------------------------------------------------------------ */

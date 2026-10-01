@@ -10,7 +10,7 @@ import { computed, ref } from 'vue'
 import { MagicStick } from '@element-plus/icons-vue'
 import { asApiError, fsApi } from '@/api'
 import type { FileFilterRule, FilterRuleGroup, FilterTestResult, NormalizedApiError } from '@/api/types'
-import { countConditions } from '@/utils/filter'
+import { countConditions, serializeFilterRule } from '@/utils/filter'
 import { formatBytes, formatCount } from '@/utils/format'
 import ErrorState from './ErrorState.vue'
 
@@ -25,12 +25,14 @@ const props = withDefaults(
 
 const emit = defineEmits<{ 'update:modelValue': [value: FileFilterRule] }>()
 
-/** 沿用旧的说明文案（07 §4.1 引用了它的前半句） */
+/** 说明文案（07 §4.1 引用了它的前半句；路径组的描述按 FzLib 实测语义修正） */
 const filterHelp =
   '每一组文本框中，可以输入多行匹配条件，任意一条匹配成功则认为该组匹配成功。' +
   '白名单用于限定「要备份什么」，全部留空表示不限制；黑名单用于排除「不要备份什么」，优先级高于白名单。' +
-  '文件组匹配文件名（含扩展名），文件夹组匹配目录名，路径组匹配相对于源目录的相对路径。' +
-  '不使用正则时，条件按通配符解释（* 匹配任意字符，? 匹配单个字符）。'
+  '文件组匹配文件名（含扩展名），文件夹组匹配目录名（路径里每一级都参与），' +
+  '路径组匹配文件的完整路径（绝对路径，匹配时反斜杠按正斜杠处理）。' +
+  '不使用正则时，条件按通配符解释（* 匹配任意字符，? 匹配单个字符）；使用正则时，' +
+  '每个输入框只能写一条表达式（多条请用 | 连接）——这一点与通配符模式不同。'
 
 const testVisible = ref(false)
 const testing = ref(false)
@@ -56,7 +58,8 @@ async function runTest(): Promise<void> {
   try {
     testResult.value = await fsApi.testFilter({
       sourceDir: props.sourceDir,
-      filterJson: countConditions(props.modelValue) === 0 ? null : JSON.stringify(props.modelValue),
+      // 与保存走**同一个**序列化函数：试算看到什么，备份就是什么。
+      filterJson: serializeFilterRule(props.modelValue),
     })
   } catch (err) {
     testError.value = asApiError(err)
@@ -135,7 +138,7 @@ const groups: { key: 'whitelist' | 'blacklist'; title: string; type: 'success' |
               type="textarea"
               :rows="2"
               :model-value="modelValue[group.key].path"
-              placeholder="每行一条，匹配相对路径，例如&#10;报告\*"
+              placeholder="每行一条，匹配完整路径，例如&#10;*/报告/*"
               @update:model-value="patchGroup(group.key, 'path', $event)"
             />
           </el-form-item>

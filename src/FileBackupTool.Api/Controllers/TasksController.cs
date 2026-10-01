@@ -1,9 +1,9 @@
-using System.Text.Json;
 using FileBackupTool.Api.Contracts;
 using FileBackupTool.Api.Infrastructure;
 using FileBackupTool.Core.Abstractions;
 using FileBackupTool.Core.Entities;
 using FileBackupTool.Core.Enums;
+using FileBackupTool.Core.Filtering;
 using FileBackupTool.Core.Models;
 using FileBackupTool.Core.Paths;
 using FileBackupTool.Data;
@@ -399,43 +399,22 @@ public sealed class TasksController(
     }
 
     /// <summary>
-    /// 归一化筛选规则 JSON。
+    /// 校验并归一化筛选规则 JSON。
     /// </summary>
     /// <remarks>
-    /// <b>非法 JSON 必须报错，不能像 <c>FilterRuleSet.FromJson</c> 那样退化为"不过滤"</b>：
-    /// 用户手写筛选规则时打错一个引号，如果被静默当成"没有规则"，他会以为筛选生效了，
-    /// 而实际上**把所有文件都备份了**——这既不危险也不符合预期，只是很难发现。
+    /// 校验规则见 <see cref="FilterRuleValidator"/>。要点：**凡是"有内容但读不懂"的输入
+    /// 一律报错**，不得退化为"不过滤"——用户配了规则、备份却收进了整个源目录，
+    /// 是备份工具里最难发现的一类失败（2026-10-01 的真实缺陷）。
+    /// <para>
+    /// 成功时返回的是**归一化**后的文本（字段名统一 PascalCase、顺序固定），
+    /// 免得大小写不一的输入被引擎侧区分大小写的 <c>FilterRuleSet.FromJson</c> 读丢。
+    /// </para>
     /// </remarks>
     private static string NormalizeFilter(string? filterJson)
     {
-        if (string.IsNullOrWhiteSpace(filterJson))
-        {
-            return "{}";
-        }
+        FilterRuleValidationResult result = FilterRuleValidator.Validate(filterJson);
 
-        if (filterJson.Length > 64 * 1024)
-        {
-            throw ApiException.BadRequest(ApiErrorCodes.InvalidRequest, "筛选规则过长（上限 64 KB）。");
-        }
-
-        try
-        {
-            using JsonDocument document = JsonDocument.Parse(filterJson);
-
-            if (document.RootElement.ValueKind != JsonValueKind.Object)
-            {
-                throw ApiException.BadRequest(ApiErrorCodes.InvalidRequest, "筛选规则必须是一个 JSON 对象。");
-            }
-        }
-        catch (JsonException ex)
-        {
-            throw ApiException.BadRequest(
-                ApiErrorCodes.InvalidRequest,
-                "筛选规则不是合法的 JSON，已拒绝保存。",
-                ex.Message);
-        }
-
-        return filterJson;
+        return result.Ok ? result.Normalized : throw FilterRuleErrorMapper.ToApiException(result);
     }
 
     private static int NormalizeInterval(int minutes) => minutes switch

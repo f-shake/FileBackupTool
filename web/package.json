@@ -9,7 +9,8 @@
     "build": "npm run type-check && vite build",
     "build:only": "vite build",
     "preview": "vite preview",
-    "type-check": "vue-tsc --noEmit"
+    "type-check": "vue-tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -25,6 +26,7 @@
     "@vitejs/plugin-vue": "^6.0.9",
     "typescript": "~5.9.3",
     "vite": "^8.3.0",
+    "vitest": "^5.0.3",
     "vue-tsc": "^3.3.11"
   }
 }

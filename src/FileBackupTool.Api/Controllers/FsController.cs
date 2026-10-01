@@ -204,8 +204,9 @@ public sealed class FsController(
     /// <b>必须与备份引擎走同一条链</b>，否则这个功能就是骗人的：用户在这里看到 100 个文件、
     /// 备份时却写进去 5000 个，比没有试算更糟。所以这里逐字复刻
     /// <c>BackupEngine.BuildFilter</c> + <c>EnumerateSource</c> 的两步：
-    /// 先 <c>FilterRuleSet.FromJson</c> →（<c>IsEnabled &amp;&amp; !IsEffectivelyEmpty</c> 时）
-    /// <c>FzLibFileFilter</c>，再包一层 <see cref="HardExcludeFileFilter"/>；
+    /// 先 <c>FilterRuleValidator.Validate</c>（认不出的规则直接 400，不静默降级）
+    /// →（<c>IsEnabled &amp;&amp; !IsEffectivelyEmpty</c> 时）<c>FzLibFileFilter</c>，
+    /// 再包一层 <see cref="HardExcludeFileFilter"/>；
     /// 枚举时用 <c>filter.DescendInto</c> 剪枝、对每个条目问 <c>IncludeFile</c>。
     /// </para>
     /// <para>
@@ -228,7 +229,15 @@ public sealed class FsController(
     {
         string sourceDir = RequireBrowsableDirectory(input.SourceDir);
 
-        FilterRuleSet rules = FilterRuleSet.FromJson(input.FilterJson);
+        // 与保存任务走**同一份校验**：同一段规则，保存时被拒、试算时却给出一个
+        // 看起来正常的数字，正是"试算骗人"的那种不一致（见 FilterRuleErrorMapper）。
+        FilterRuleValidationResult validation = FilterRuleValidator.Validate(input.FilterJson);
+        if (!validation.Ok)
+        {
+            throw FilterRuleErrorMapper.ToApiException(validation);
+        }
+
+        FilterRuleSet rules = validation.Rule!;
 
         IFileFilter inner = rules.IsEnabled && !rules.IsEffectivelyEmpty
             ? new FzLibFileFilter(rules, _normalizer)

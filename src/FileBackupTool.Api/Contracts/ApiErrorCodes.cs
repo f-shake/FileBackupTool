@@ -57,6 +57,19 @@ public static class ApiErrorCodes
     public const string TaskNameRequired = "TASK_NAME_REQUIRED";
     public const string TaskDisabled = "TASK_DISABLED";
 
+    // ---- 筛选规则 ----
+    /// <summary>
+    /// 筛选规则 JSON 不合法或形状无法识别。
+    /// </summary>
+    /// <remarks>
+    /// 与通用的 <see cref="InvalidRequest"/> 分开，是因为这一条**必须让前端看见**：
+    /// 它对应"界面里配了规则、后端却读不懂"的静默退化（2026-10-01 修）。
+    /// </remarks>
+    public const string FilterRuleInvalid = "FILTER_RULE_INVALID";
+
+    /// <summary>正则模式下表达式编译不过（字段名在 <c>detail</c> 里）。</summary>
+    public const string FilterRegexInvalid = "FILTER_REGEX_INVALID";
+
     // ---- 快照 ----
     public const string SnapshotNotFound = "SNAPSHOT_NOT_FOUND";
     public const string SnapshotNotRestorable = "SNAPSHOT_NOT_RESTORABLE";

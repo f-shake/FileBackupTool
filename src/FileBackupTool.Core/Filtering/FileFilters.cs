@@ -70,6 +70,15 @@ public sealed class FilterRuleSet
         ExcludePaths = ExcludePaths,
     };
 
+    /// <summary>六个条件字段是否全为空（即"没有规则"）。</summary>
+    /// <remarks>
+    /// <b>必须 <see cref="JsonIgnoreAttribute"/>。</b>它是计算属性，但 System.Text.Json 默认会
+    /// 序列化公开的 get-only 属性——不忽略，<see cref="ToJson"/> 就会多写出一个
+    /// <c>"IsEffectivelyEmpty"</c> 字段。后果不只是"多一个字段"：校验器
+    /// （<c>FilterRuleValidator</c>）会因此认不出**自己产出的**归一化文本，
+    /// "GET 任务 → 原样 PUT 回去"会拿到一个由服务端自己制造的 400。
+    /// </remarks>
+    [JsonIgnore]
     public bool IsEffectivelyEmpty =>
         string.IsNullOrWhiteSpace(IncludeFiles) && string.IsNullOrWhiteSpace(ExcludeFiles) &&
         string.IsNullOrWhiteSpace(IncludeFolders) && string.IsNullOrWhiteSpace(ExcludeFolders) &&
