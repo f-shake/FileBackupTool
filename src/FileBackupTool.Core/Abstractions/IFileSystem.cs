@@ -97,7 +97,16 @@ public interface IFileSystem
         FileEnumerationOptions? options = null,
         Func<string, bool>? descendInto = null);
 
-    Stream OpenRead(string fullPath);
+    /// <summary>打开一个只读流。</summary>
+    /// <param name="backgroundIo">
+    /// 是否为这个句柄申请**低 IO 优先级**（Windows 的 <c>IoPriorityHintVeryLow</c>）。
+    /// <para>
+    /// 只有备份**读源文件**时才传 <c>true</c>：那一刻用户可能正在往同一块盘里写东西
+    /// （合成视频、拷照片），备份应当让路。还原不传 —— 那是用户自己等着看结果的前台操作，
+    /// 把它降成后台只会让人干等。写入侧也不传：blob 落在别的盘上，与用户的写入不争。
+    /// </para>
+    /// </param>
+    Stream OpenRead(string fullPath, bool backgroundIo = false);
 
     /// <summary>创建（或截断）文件用于写入。</summary>
     Stream Create(string fullPath);

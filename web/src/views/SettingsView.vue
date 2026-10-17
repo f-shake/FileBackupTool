@@ -278,6 +278,13 @@ onMounted(() => {
                 重算哈希在 TB 级数据上极慢，默认关闭
               </span>
             </el-form-item>
+
+            <el-form-item label="备份让路（低 IO 优先级）">
+              <el-switch v-model="settings.lowPriorityIoEnabled" />
+              <span class="fbt-footnote settings__hint">
+                备份读源盘时申请低 IO 优先级：盘空闲时照样跑满，你往同一块盘里写东西（合成视频、拷素材）时自动让路。改完立即生效
+              </span>
+            </el-form-item>
           </el-form>
 
           <div class="fbt-pane-title" style="margin-top: 12px">服务端信息（只读）</div>

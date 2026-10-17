@@ -69,6 +69,31 @@ public sealed class JobOptions
 
     /// <summary>重试的基础退避时长（指数退避的底数）。</summary>
     public double IoRetryBaseDelaySeconds { get; set; } = 0.5;
+
+    /// <summary>
+    /// 部分写入防护的兜底静默期，秒。文件距最后修改不足此时长的，本轮**不读**。
+    /// <c>0</c> 表示关闭这道守卫。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="MonitoringOptions.SettleWindowSeconds"/> **不是同一个东西**，刻意不共用：
+    /// <list type="bullet">
+    /// <item>监控那个管的是「把高频事件合并成一次备份」，10 秒足够；</item>
+    /// <item>这个管的是「文件写完没有」，要容忍大文件写入的空档（ffmpeg 带缓冲、盘忙时
+    /// 两次落盘间隔十几秒很常见）。用 10 秒会让它形同虚设。</item>
+    /// </list>
+    /// <para>
+    /// 更要紧的是：**它只是"省钱"的启发式，不是正确性保证**。NTFS 对正被打开写入的文件，
+    /// 目录项里的长度与时间戳是滞后的 —— 一个正在写的文件看起来可以完全"静止"。
+    /// 正确性由拷贝后的复核（<c>BlobAcquirer</c>）保证，这里只是为了避免白读一个大文件。
+    /// </para>
+    /// </remarks>
+    public double MinFileAgeSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// 备份读源文件时是否申请低 IO 优先级。**这里只是首次播种的默认值**，
+    /// 运行时以数据库设置 <c>Io.LowPriorityRead</c> 为准（与保留策略的约定一致）。
+    /// </summary>
+    public bool LowPriorityIo { get; set; } = true;
 }
 
 /// <summary>存储参数。</summary>

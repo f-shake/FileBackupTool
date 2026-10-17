@@ -54,6 +54,9 @@ public sealed class IntegrationHarness : IAsyncDisposable
 
     public PhysicalFileSystem Fs { get; }
 
+    /// <summary>低 IO 优先级开关。真实文件系统上它是真的会去设句柄优先级（失败静默降级）。</summary>
+    public IoPrioritySwitch IoSwitch { get; } = new();
+
     public IDbContextFactory<AppDbContext> DbFactory { get; private set; } = null!;
 
     public TaskStore Tasks { get; private set; } = null!;
@@ -96,7 +99,14 @@ public sealed class IntegrationHarness : IAsyncDisposable
         Directory.CreateDirectory(RestoreDir);
         Directory.CreateDirectory(DataDir);
 
-        var options = new JobOptions { IoRetryBaseDelaySeconds = 0 };
+        var options = new JobOptions
+        {
+            IoRetryBaseDelaySeconds = 0,
+
+            // 默认关闭"文件年龄"守卫：多数用例写入文件后立刻备份，守卫开着会把它们全跳过。
+            // 专门验证守卫的用例在 configure 里打开它。
+            MinFileAgeSeconds = 0,
+        };
         configure?.Invoke(options);
 
         DbContextOptions<AppDbContext> dbOptions = DatabaseBootstrapper.BuildOptions(
@@ -128,7 +138,7 @@ public sealed class IntegrationHarness : IAsyncDisposable
 
         Backup = new BackupEngine(
             DbFactory, Tasks, FileRecords, Chains, Fs, Normalizer, hash, BlobStores,
-            NullManifestWriter.Instance, Integrity, clock, logSink,
+            NullManifestWriter.Instance, Integrity, clock, logSink, IoSwitch,
             Options.Create(options),
             Options.Create(new StorageOptions { DataDirectory = DataDir }),
             NullLoggerFactory.Instance,

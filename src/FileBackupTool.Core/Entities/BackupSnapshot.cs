@@ -32,6 +32,17 @@ public class BackupSnapshot
     /// <summary>本次备份中处理失败的文件数。**快照必须携带失败计数**——备份工具最危险的失败模式不是报错，而是"显示成功但实际不完整"。</summary>
     public int FailedFileCount { get; set; }
 
+    /// <summary>
+    /// 本次因"仍在写入"而跳过的文件数。**不计入失败**，下一轮会自动重试。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="FailedFileCount"/> 分开是刻意的：失败代表"试过了、没成"，跳过代表
+    /// "还不该试"。把它们混在一起，会让源目录里一直有几个正在写的大文件时，
+    /// 每次备份都显示成"成功（N 个失败）"，用户迟早会对这个数字脱敏 ——
+    /// 而它正是"备份看起来成功、实际不完整"的唯一提示。
+    /// </remarks>
+    public int SkippedFileCount { get; set; }
+
     /// <summary>本次实际写入 blob 的字节数（用于快照列表的"占用空间"列）。</summary>
     public long TotalBytes { get; set; }
 

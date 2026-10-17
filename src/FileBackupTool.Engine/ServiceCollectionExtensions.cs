@@ -35,6 +35,9 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IFileSystem, PhysicalFileSystem>();
         services.TryAddSingleton<BlobStoreFactory>();
 
+        // 默认开启。宿主可以在调用本方法**之前**用配置值注册一个实例把它顶掉。
+        services.TryAddSingleton(new IoPrioritySwitch());
+
         // ---- 作业事件（默认不发） ----
         services.TryAddSingleton<IJobEventPublisher>(NullJobEventPublisher.Instance);
         services.TryAddSingleton<IManifestWriter, Manifests.ManifestWriter>();

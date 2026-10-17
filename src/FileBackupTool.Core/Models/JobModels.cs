@@ -60,6 +60,16 @@ public sealed record BackupRunResult(
     public bool HasFailures => FailedFileCount > 0;
 
     /// <summary>
+    /// 因"仍在写入"而跳过的文件数。**不是失败**：下一轮会自动重试。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="FailedFileCount"/> 分开，是因为两者的用户预期完全不同：
+    /// 失败要排查，跳过只要等一会儿。混在一起会让"正在拷一个大文件"也报成失败，
+    /// 很快这个数字就没人看了。
+    /// </remarks>
+    public int SkippedFileCount { get; init; }
+
+    /// <summary>
     /// 这次备份是否**因用户取消**而作废。
     /// </summary>
     /// <remarks>

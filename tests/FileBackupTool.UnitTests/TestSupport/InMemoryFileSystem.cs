@@ -124,6 +124,13 @@ public sealed class InMemoryFileSystem(IPathNormalizer normalizer) : IFileSystem
 
     public FileEntry? GetFile(string fullPath)
     {
+        // 让测试模拟"元数据滞后"：目录项报告的长度/时间与真实内容不一致。
+        // 真实 NTFS 对正被打开写入的文件就是这样，而这是部分写入防护必须扛住的形态。
+        if (OverrideGetFile is not null)
+        {
+            return OverrideGetFile(fullPath);
+        }
+
         if (!_nodes.TryGetValue(Key(fullPath), out Node? node) || node.IsDirectory)
         {
             return null;
@@ -186,7 +193,18 @@ public sealed class InMemoryFileSystem(IPathNormalizer normalizer) : IFileSystem
         }
     }
 
-    public Stream OpenRead(string fullPath)
+    /// <summary>
+    /// 打开只读流时触发。测试用它模拟"枚举之后、读完之前文件又变了"——
+    /// 这正是部分写入防护要抓的那一类，而内存文件系统平时是不变的。
+    /// </summary>
+    public Action<string>? OnOpenRead { get; set; }
+
+    /// <summary>
+    /// 覆盖 <see cref="GetFile"/> 的返回值。用于模拟"目录项元数据滞后于真实内容"。
+    /// </summary>
+    public Func<string, FileEntry?>? OverrideGetFile { get; set; }
+
+    public Stream OpenRead(string fullPath, bool backgroundIo = false)
     {
         ReadOpenCount++;
 
@@ -202,6 +220,14 @@ public sealed class InMemoryFileSystem(IPathNormalizer normalizer) : IFileSystem
         }
 
         if (!_nodes.TryGetValue(Key(fullPath), out Node? node) || node.IsDirectory)
+        {
+            throw new FileNotFoundException("文件不存在。", fullPath);
+        }
+
+        OnOpenRead?.Invoke(fullPath);
+
+        // 钩子可能在打开期间改了内容，所以重新取一次。
+        if (!_nodes.TryGetValue(Key(fullPath), out node) || node.IsDirectory)
         {
             throw new FileNotFoundException("文件不存在。", fullPath);
         }

@@ -236,6 +236,11 @@ public sealed class SettingsController(
             parts.Add($"默认深度校验：{before.VerifyDeepHashByDefault} → {after.VerifyDeepHashByDefault}");
         }
 
+        if (before.LowPriorityIoEnabled != after.LowPriorityIoEnabled)
+        {
+            parts.Add($"备份让路（低 IO 优先级）：{before.LowPriorityIoEnabled} → {after.LowPriorityIoEnabled}");
+        }
+
         if (Math.Abs(before.FailureRateThresholdPercent - after.FailureRateThresholdPercent) > double.Epsilon)
         {
             parts.Add($"失败率阈值：{before.FailureRateThresholdPercent}% → {after.FailureRateThresholdPercent}%");

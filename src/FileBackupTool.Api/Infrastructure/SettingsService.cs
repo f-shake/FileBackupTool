@@ -1,6 +1,7 @@
 using System.Globalization;
 using FileBackupTool.Api.Contracts;
 using FileBackupTool.Core.Configuration;
+using FileBackupTool.Core.IO;
 using FileBackupTool.Data;
 using FileBackupTool.Core.Abstractions;
 
@@ -20,10 +21,11 @@ namespace FileBackupTool.Api.Infrastructure;
 /// 键名统一收敛在这里，不再散落到控制器里拼字符串。
 /// </para>
 /// </remarks>
-public sealed class SettingsService(SettingsStore store, IClock clock)
+public sealed class SettingsService(SettingsStore store, IClock clock, IoPrioritySwitch ioSwitch)
 {
     private readonly SettingsStore _store = store;
     private readonly IClock _clock = clock;
+    private readonly IoPrioritySwitch _ioSwitch = ioSwitch;
 
     // ---- 键名 ----
     public const string KeyRetentionMode = "Retention.Mode";
@@ -31,6 +33,9 @@ public sealed class SettingsService(SettingsStore store, IClock clock)
     public const string KeyAutoBackupEnabled = "Scheduler.AutoBackupEnabled";
     public const string KeyVerifyDeepHash = "Security.VerifyDeepHashByDefault";
     public const string KeyFailureRateThreshold = "Jobs.FailureRateThresholdPercent";
+
+    /// <summary>备份读源文件时是否申请低 IO 优先级。改了立即生效，不需要重启。</summary>
+    public const string KeyLowPriorityIo = "Io.LowPriorityRead";
 
     // ---- 读 ----
 
@@ -40,6 +45,13 @@ public sealed class SettingsService(SettingsStore store, IClock clock)
 
     public async Task<bool> GetVerifyDeepHashByDefaultAsync(CancellationToken ct) =>
         await GetBoolAsync(KeyVerifyDeepHash, defaultValue: false, ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// 备份读源文件时是否申请低 IO 优先级。**默认开启**——它只在争用时生效，
+    /// 关掉它只会让备份和用户的前台任务互相拖着走。
+    /// </summary>
+    public async Task<bool> GetLowPriorityIoAsync(CancellationToken ct) =>
+        await GetBoolAsync(KeyLowPriorityIo, defaultValue: true, ct).ConfigureAwait(false);
 
     public async Task<double> GetFailureRateThresholdPercentAsync(CancellationToken ct)
     {
@@ -86,6 +98,7 @@ public sealed class SettingsService(SettingsStore store, IClock clock)
         Retention = await GetRetentionAsync(ct).ConfigureAwait(false),
         VerifyDeepHashByDefault = await GetVerifyDeepHashByDefaultAsync(ct).ConfigureAwait(false),
         FailureRateThresholdPercent = await GetFailureRateThresholdPercentAsync(ct).ConfigureAwait(false),
+        LowPriorityIoEnabled = await GetLowPriorityIoAsync(ct).ConfigureAwait(false),
     };
 
     // ---- 写 ----
@@ -99,6 +112,11 @@ public sealed class SettingsService(SettingsStore store, IClock clock)
             KeyFailureRateThreshold,
             settings.FailureRateThresholdPercent.ToString(CultureInfo.InvariantCulture),
             ct).ConfigureAwait(false);
+
+        // 开关必须**立刻**落到内存里：用户改它正是因为"现在就有盘在争"，
+        // 让他为此重启备份服务，这个开关就等于没有。
+        await SetBoolAsync(KeyLowPriorityIo, settings.LowPriorityIoEnabled, ct).ConfigureAwait(false);
+        _ioSwitch.Enabled = settings.LowPriorityIoEnabled;
 
         // 还原根白名单：PUT 是**整体替换**语义，这里必须写。
         // 漏写的后果不是"少存一个字段"——控制器已经校验过、审计也已经记成"白名单已从 A 改成 B"，
@@ -141,6 +159,7 @@ public sealed class SettingsService(SettingsStore store, IClock clock)
     public async Task SeedFromConfigurationAsync(
         SecurityOptions security,
         RetentionOptions retention,
+        JobOptions jobs,
         CancellationToken ct)
     {
         if (await _store.GetStringAsync(KeyAutoBackupEnabled, ct).ConfigureAwait(false) is null)
@@ -202,6 +221,16 @@ public sealed class SettingsService(SettingsStore store, IClock clock)
         {
             await SetAllowedRestoreRootsAsync(security.AllowedRestoreRoots, ct).ConfigureAwait(false);
         }
+
+        // 低 IO 优先级：配置只负责出厂默认，数据库才是事实来源。
+        // 播种完立刻把最终生效值推进内存开关——否则重启后开关会停在"配置里的值"，
+        // 而用户在设置页改过的值要等到下一次 PUT 才生效。
+        if (await _store.GetStringAsync(KeyLowPriorityIo, ct).ConfigureAwait(false) is null)
+        {
+            await SetBoolAsync(KeyLowPriorityIo, jobs.LowPriorityIo, ct).ConfigureAwait(false);
+        }
+
+        _ioSwitch.Enabled = await GetLowPriorityIoAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>读保留策略的强类型版本，给 <c>RetentionService</c> 用。</summary>

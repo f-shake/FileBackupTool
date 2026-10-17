@@ -3,6 +3,7 @@ using FileBackupTool.Core.Configuration;
 using FileBackupTool.Core.Entities;
 using FileBackupTool.Core.Enums;
 using FileBackupTool.Core.Hashing;
+using FileBackupTool.Core.IO;
 using FileBackupTool.Core.Models;
 using FileBackupTool.Core.Paths;
 using FileBackupTool.Data;
@@ -66,7 +67,7 @@ public sealed class TestHarness : IAsyncDisposable
 
         Backup = new BackupEngine(
             db.Factory, TaskStore, FileRecords, Chains, fs, Normalizer, Hash, BlobStores,
-            ManifestWriter, Integrity, clock, LogSink,
+            ManifestWriter, Integrity, clock, LogSink, IoSwitch,
             Options.Create(jobOptions), Options.Create(new StorageOptions()),
             NullLoggerFactory.Instance, NullLogger<BackupEngine>.Instance);
 
@@ -96,6 +97,9 @@ public sealed class TestHarness : IAsyncDisposable
     public JobOptions JobOptions { get; }
 
     public IHashService Hash { get; } = Sha256HashService.Instance;
+
+    /// <summary>低 IO 优先级开关（测试里默认开启，但内存文件系统没有句柄，实际是空操作）。</summary>
+    public IoPrioritySwitch IoSwitch { get; } = new();
 
     public TaskStore TaskStore { get; }
 
@@ -130,6 +134,11 @@ public sealed class TestHarness : IAsyncDisposable
             // 测试里把重试的退避压到 0，避免真的等待
             IoRetryBaseDelaySeconds = 0,
             DbBatchSize = 50,
+
+            // **默认关闭"文件年龄"守卫**：绝大多数用例关心的是别的行为，而它们写文件时
+            // 用的时间戳就是"刚刚"——守卫开着会让每个用例都跳过全部文件。
+            // 专门验证守卫的用例在 configure 里把它打开。
+            MinFileAgeSeconds = 0,
         };
 
         configure?.Invoke(options);

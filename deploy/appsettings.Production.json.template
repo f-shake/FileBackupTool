@@ -1,4 +1,4 @@
-﻿{
+{
   // =========================================================================
   // FileBackupTool · 生产环境配置（appsettings.Production.json）
   //
@@ -63,6 +63,17 @@
     // 写法示例（JSON 里反斜杠要写两个）：
     //   "AllowedRestoreRoots": [ "D:\\Restore", "E:\\恢复" ]
     "AllowedRestoreRoots": []
+  },
+
+  "Jobs": {
+    // 部分写入防护的兜底静默期，秒。距最后修改不足此时长的文件本轮不读（0 = 关闭）。
+    // 默认 60；源盘上常有"正在写入的大文件"（合成视频、拷贝相机素材）时可以调大。
+    "MinFileAgeSeconds": 60,
+
+    // 备份读源文件时申请低 IO 优先级（Windows）。默认 true：盘空闲时跑满，
+    // 用户往同一块盘里写东西时自动让路。**这里只是出厂默认**，
+    // 运行时以设置页的开关为准（数据库键 Io.LowPriorityRead），改了立即生效、无需重启。
+    "LowPriorityIo": true
   },
 
   "Serilog": {

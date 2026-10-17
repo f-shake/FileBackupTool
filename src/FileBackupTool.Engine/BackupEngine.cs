@@ -4,6 +4,7 @@ using FileBackupTool.Core.Configuration;
 using FileBackupTool.Core.Entities;
 using FileBackupTool.Core.Enums;
 using FileBackupTool.Core.Filtering;
+using FileBackupTool.Core.IO;
 using FileBackupTool.Core.Models;
 using FileBackupTool.Data;
 using FileBackupTool.Engine.Blobs;
@@ -49,6 +50,7 @@ public sealed class BackupEngine(
     IIntegrityService integrity,
     IClock clock,
     IBackupLogSink logSink,
+    IoPrioritySwitch ioSwitch,
     IOptions<JobOptions> jobOptions,
     IOptions<StorageOptions> storageOptions,
     ILoggerFactory loggerFactory,
@@ -66,6 +68,7 @@ public sealed class BackupEngine(
     private readonly IIntegrityService _integrity = integrity;
     private readonly IClock _clock = clock;
     private readonly IBackupLogSink _logSink = logSink;
+    private readonly IoPrioritySwitch _ioSwitch = ioSwitch;
     private readonly JobOptions _options = jobOptions.Value;
     private readonly StorageOptions _storage = storageOptions.Value;
     private readonly ILoggerFactory _loggerFactory = loggerFactory;
@@ -207,7 +210,12 @@ public sealed class BackupEngine(
         try
         {
             IFileFilter filter = BuildFilter(task);
-            var acquirer = new BlobAcquirer(_fs, blobStore, _hash, _options, _loggerFactory);
+            var acquirer = new BlobAcquirer(_fs, blobStore, _hash, _options, _ioSwitch, _loggerFactory);
+
+            if (_ioSwitch.Enabled && !IoPriority.IsAvailable)
+            {
+                _logger.LogDebug("未启用低 IO 优先级：当前平台或文件系统不支持该能力，备份照常进行。");
+            }
 
             if (type == SnapshotType.Increment)
             {
@@ -251,6 +259,7 @@ public sealed class BackupEngine(
         // 放在这里而不是枚举结束时：两条路径（全量/增量）都会跳过目录，收口在同一个地方，
         // 而且要在 ApplyCountersToSnapshot 之前——它要往 FailedFileCount 上计数。
         await ReportSkippedDirectoriesAsync(task.Id, snapshot.Id, context).ConfigureAwait(false);
+        await ReportSkippedFilesAsync(task.Id, snapshot.Id, context).ConfigureAwait(false);
 
         ApplyCountersToSnapshot(context);
         snapshot.EndTime = _clock.UtcNow;
@@ -276,9 +285,18 @@ public sealed class BackupEngine(
             await TryCollectAsync(context, progress, CancellationToken.None).ConfigureAwait(false);
         }
 
+        // 诊断：开关开着、平台也说支持，但整轮一次都没成功应用过 ——
+        // 多半是源盘的文件系统不支持该信息类。这行只进调试日志，不影响备份。
+        if (_ioSwitch.Enabled && IoPriority.IsAvailable && !IoPriority.HasEverApplied)
+        {
+            _logger.LogDebug("低 IO 优先级已开启，但本机尚未成功应用过（源盘文件系统可能不支持）。");
+        }
+
         await LogAsync(
             task.Id, snapshot.Id,
-            snapshot.FailedFileCount > 0 ? LogLevel.Warning : LogLevel.Information,
+            snapshot.FailedFileCount > 0 || snapshot.SkippedFileCount > 0
+                ? LogLevel.Warning
+                : LogLevel.Information,
             snapshot.Status == SnapshotStatus.Completed
                 ? $"备份完成：新增 {snapshot.CreatedFileCount}，修改 {snapshot.ModifiedFileCount}，"
                   + $"删除 {snapshot.DeletedFileCount}，失败 {snapshot.FailedFileCount}，"
@@ -288,6 +306,9 @@ public sealed class BackupEngine(
                   // 而那棵树根本没被备份（03 §7 的立场是"不静默"）。
                   + (context.SkippedDirectoryCount > 0
                       ? $"（另有 {context.SkippedDirectoryCount} 个目录未被进入，详见上一条日志。）"
+                      : string.Empty)
+                  + (snapshot.SkippedFileCount > 0
+                      ? $"（另有 {snapshot.SkippedFileCount} 个文件因仍在写入而跳过，下次扫描会重试。）"
                       : string.Empty)
                 : $"备份未完成（{snapshot.Status}）：{abortReason}",
             null, CancellationToken.None).ConfigureAwait(false);
@@ -299,6 +320,7 @@ public sealed class BackupEngine(
             snapshot.ImageFileCount, snapshot.ImageTotalBytes, abortReason)
         {
             Canceled = canceled,
+            SkippedFileCount = snapshot.SkippedFileCount,
         };
     }
 
@@ -335,8 +357,15 @@ public sealed class BackupEngine(
 
                     if (!virtualFull)
                     {
+                        if (!IsSettled(entry))
+                        {
+                            context.RecordSkip(entry.FullPath);
+                            context.Processed++;
+                            continue;
+                        }
+
                         BlobAcquireResult acquired = await acquirer
-                            .AcquireAsync(entry.FullPath, knownLengths.Contains(entry.Length), ct)
+                            .AcquireAsync(entry, knownLengths.Contains(entry.Length), ct)
                             .ConfigureAwait(false);
 
                         contentHash = acquired.Hash;
@@ -351,7 +380,14 @@ public sealed class BackupEngine(
                     context.Created++;
                     context.CreatedBytes += entry.Length;
                     context.Processed++;
+                    context.Attempted++;
                     MarkFileSucceeded(context);
+                }
+                catch (FileUnstableException ex)
+                {
+                    // 文件还在写：不是失败。不计失败率、不触发中止，下一轮再来。
+                    context.RecordSkip(ex.Path);
+                    context.Processed++;
                 }
                 catch (Exception ex) when (IsPerFileFailure(ex))
                 {
@@ -432,12 +468,22 @@ public sealed class BackupEngine(
                     {
                         // 未变化：**不写记录**。镜像里已有的那条记录继续生效。
                         context.Processed++;
+                        context.Attempted++;
                         MarkFileSucceeded(context);
                         continue;
                     }
 
+                    if (!IsSettled(entry))
+                    {
+                        // 还在写：本轮不取 blob、不写记录。镜像里保持它上一版的状态，
+                        // 下一轮它会重新以 Created/Modified 出现。
+                        context.RecordSkip(entry.FullPath);
+                        context.Processed++;
+                        continue;
+                    }
+
                     BlobAcquireResult acquired = await acquirer
-                        .AcquireAsync(entry.FullPath, knownLengths.Contains(entry.Length), ct)
+                        .AcquireAsync(entry, knownLengths.Contains(entry.Length), ct)
                         .ConfigureAwait(false);
 
                     context.BytesWritten += acquired.BytesWritten;
@@ -459,7 +505,14 @@ public sealed class BackupEngine(
                     }
 
                     context.Processed++;
+                    context.Attempted++;
                     MarkFileSucceeded(context);
+                }
+                catch (FileUnstableException ex)
+                {
+                    // 拷贝期间文件在变：本轮的 blob 已作废。按跳过处理，下一轮重试。
+                    context.RecordSkip(ex.Path);
+                    context.Processed++;
                 }
                 catch (Exception ex) when (IsPerFileFailure(ex))
                 {
@@ -536,6 +589,7 @@ public sealed class BackupEngine(
         snapshot.ModifiedFileCount = context.Modified;
         snapshot.DeletedFileCount = context.Deleted;
         snapshot.FailedFileCount = context.Failed;
+        snapshot.SkippedFileCount = context.SkippedInProgress;
         snapshot.TotalBytes = context.BytesWritten;
 
         snapshot.ImageFileCount = Math.Max(0,
@@ -623,6 +677,42 @@ public sealed class BackupEngine(
     private static void MarkFileSucceeded(RunContext context) => context.ConsecutiveFailures = 0;
 
     /// <summary>
+    /// 前置守卫：这个文件距最后修改是否已经超过静默期。
+    /// </summary>
+    /// <remarks>
+    /// <b>它只是"省钱"，不是正确性保证</b>：NTFS 对正被打开写入的文件，目录项里的长度与
+    /// 最后写入时间是滞后的 —— 一个正在写的文件看起来可以完全静止，这条守卫会放行。
+    /// 真正兜住的是 <c>BlobAcquirer</c> 的拷后复核。这里拦住 90% 的明显情况，
+    /// 目的只是别白读一个几十 GB 的未完成文件。
+    /// <para>
+    /// 未来时间戳分两种：**小幅超前**（不超过一个静默期）按"正在写"处理；
+    /// **大幅超前**（超过一个静默期）一律放行 —— 那多半是相机或另一台机器的时钟不准，
+    /// 一直跳过等于永远不备份它。
+    /// </para>
+    /// </remarks>
+    private bool IsSettled(FileEntry entry)
+    {
+        double window = _options.MinFileAgeSeconds;
+        if (window <= 0)
+        {
+            return true;
+        }
+
+        DateTime now = _clock.UtcNow;
+        TimeSpan age = now - entry.FileTimeUtc;
+
+        if (age < TimeSpan.Zero)
+        {
+            // 未来时间戳。小幅超前按"仍在写入"处理（文件刚创建、时钟粒度可能让它略微超前）；
+            // 但偏差超过一个静默期就不能再等 —— 那多半是相机或另一台机器的时钟不准，
+            // 等下去等于永远不备份它。宁可带一个不准的时间戳备份，也不能无限期跳过。
+            return -age >= TimeSpan.FromSeconds(window);
+        }
+
+        return age.TotalSeconds >= window;
+    }
+
+    /// <summary>
     /// 取走并上报本次枚举时被跳过的目录。
     /// </summary>
     /// <remarks>
@@ -707,6 +797,34 @@ public sealed class BackupEngine(
             snapshotId, skipped.Count, unreadable);
     }
 
+    /// <summary>
+    /// 把"因仍在写入而跳过"的文件汇总成一条日志。逐文件刷屏没有意义，
+    /// 但**必须留下证据**：这些文件这一轮没有进备份，用户要能看出"这次备份并不完整"。
+    /// </summary>
+    private async Task ReportSkippedFilesAsync(Guid taskId, int snapshotId, RunContext context)
+    {
+        int skipped = context.SkippedInProgress;
+        if (skipped == 0)
+        {
+            return;
+        }
+
+        string sample = string.Join("、", context.SkippedSamples);
+        string tail = skipped > context.SkippedSamples.Count ? " …" : string.Empty;
+
+        await LogAsync(
+                taskId, snapshotId, LogLevel.Warning,
+                $"有 {skipped} 个文件因仍在写入而跳过（下一次扫描会重试）：{sample}{tail}",
+                _options.MinFileAgeSeconds > 0
+                    ? $"判据：距最后修改不足 {_options.MinFileAgeSeconds:F0} 秒，或读取期间长度/时间发生变化。"
+                      + "跳过不是失败：这些文件没有进入本次快照，何时重试取决于监控触发或任务的定时设置，不保证是立刻。"
+                    : "判据：读取期间长度/时间发生变化（时间守卫已关闭）。跳过不是失败，会在下一次扫描时重试。",
+                CancellationToken.None)
+            .ConfigureAwait(false);
+
+        _logger.LogWarning("快照 #{Id} 有 {Count} 个文件因仍在写入而跳过。", snapshotId, skipped);
+    }
+
     private async Task RegisterFileFailureAsync(
         RunContext context,
         string path,
@@ -717,17 +835,20 @@ public sealed class BackupEngine(
         context.Failed++;
         context.ConsecutiveFailures++;
         context.Processed++;
+        context.Attempted++;
 
         _logger.LogWarning(ex, "处理文件失败：{Path}", path);
         await LogAsync(context.Task.Id, context.Snapshot.Id, LogLevel.Warning,
             $"处理文件失败：{path}", $"{ex.GetType().Name}: {ex.Message}", ct).ConfigureAwait(false);
 
+        // 分母只算"真正尝试过"的文件：跳过的那批根本没读过内容，把它们算进来会稀释失败率
+        // （100 个跳过 + 1 个真失败会显示成 1%），也会把样本数凑过最小样本门槛。
         if (_options.FailureRatioThreshold > 0
-            && context.Processed >= _options.FailureRatioMinSamples
-            && (double)context.Failed / context.Processed > _options.FailureRatioThreshold)
+            && context.Attempted >= _options.FailureRatioMinSamples
+            && (double)context.Failed / context.Attempted > _options.FailureRatioThreshold)
         {
             throw new BackupAbortedException(
-                $"失败率 {context.Failed}/{context.Processed} 超过阈值 {_options.FailureRatioThreshold:P0}，已中止整个备份。");
+                $"失败率 {context.Failed}/{context.Attempted} 超过阈值 {_options.FailureRatioThreshold:P0}，已中止整个备份。");
         }
 
         if (context.ConsecutiveFailures >= _options.ConsecutiveFailureThreshold)
@@ -964,6 +1085,16 @@ public sealed class BackupEngine(
 
         public int Processed { get; set; }
 
+        /// <summary>
+        /// 真正"碰过"的文件数：**不含因仍在写入而跳过的那批**。
+        /// </summary>
+        /// <remarks>
+        /// 失败率的分母必须是它，而不是 <see cref="Processed"/>：跳过意味着"根本没读"，
+        /// 算进分母会把失败率稀释（100 个跳过 + 1 个真失败显示成 1%），
+        /// 也会把样本数凑过 <c>FailureRatioMinSamples</c> 门槛。
+        /// </remarks>
+        public int Attempted { get; set; }
+
         public int Created { get; set; }
 
         public int Modified { get; set; }
@@ -994,6 +1125,35 @@ public sealed class BackupEngine(
 
         /// <summary>本次枚举时跳过的目录数（含**有意**跳过的重解析点）。</summary>
         public int SkippedDirectoryCount { get; set; }
+
+        /// <summary>因"仍在写入"而跳过的文件数。**不计入失败**。</summary>
+        public int SkippedInProgress { get; set; }
+
+        /// <summary>跳过的文件样例（最多 5 个），供汇总日志使用。</summary>
+        public List<string> SkippedSamples { get; } = [];
+
+        /// <summary>
+        /// 记一次跳过。样例只留前 5 个：日志是给人看的，刷 200 条路径只会让它变成噪音。
+        /// </summary>
+        public void RecordSkip(string path)
+        {
+            SkippedInProgress++;
+
+            if (SkippedSamples.Count >= 5)
+            {
+                return;
+            }
+
+            foreach (string existing in SkippedSamples)
+            {
+                if (string.Equals(existing, path, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
+            SkippedSamples.Add(path);
+        }
 
         public HashSet<string> TouchedRelativePaths { get; } = new(StringComparer.OrdinalIgnoreCase);
 

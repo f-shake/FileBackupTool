@@ -164,6 +164,7 @@ function makeSnapshot(
     modifiedFileCount: type === 'Full' ? 0 : 1,
     deletedFileCount: 0,
     failedFileCount: 0,
+    skippedFileCount: 0,
     totalBytes: type === 'Full' ? 18_446_744_073 : 1_048_576,
     abortReason: null,
     ...opts,
@@ -602,6 +603,7 @@ export const mockSettings: AppSettings = {
   retention: { enabled: false, mode: 'Count', value: 20, applyToFullChains: true },
   verifyDeepHashByDefault: false,
   failureRateThresholdPercent: 10,
+  lowPriorityIoEnabled: true,
 }
 
 export const mockServerInfo: ServerInfo = {

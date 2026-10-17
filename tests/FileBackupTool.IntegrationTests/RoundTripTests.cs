@@ -420,6 +420,41 @@ public class RoundTripTests
         Assert.Equal(content, restored);
     }
 
+    [Fact]
+    public async Task 引擎层守卫_拒绝备份刚开始写入的文件并在下一轮自动补上()
+    {
+        // 这条用例针对的是真实事故：ffmpeg 正把合成结果往数据盘写，备份同时开跑，
+        // 结果把一个只写了一半的 mp4 当完整文件固化了（记录长度 0、blob 里却有 4 MB）。
+        await using IntegrationHarness h = await IntegrationHarness.CreateAsync(
+            o => o.MinFileAgeSeconds = 60);
+        var task = await h.CreateTaskAsync();
+
+        byte[] content = RandomBytes(new Random(23), 64 * 1024);
+
+        // 真实 NTFS 时间戳：刚写完 → 年龄 0 秒，会被守卫判定为"仍在写入"
+        h.WriteSourceFile("just-written.mp4", content);
+
+        BackupRunResult first = await h.BackupAsync(task.Id, SnapshotType.Full);
+
+        Assert.Equal(1, first.SkippedFileCount);
+        Assert.Equal(0, first.CreatedFileCount);
+        Assert.Equal(0, first.FailedFileCount);
+        Assert.Empty(await ReadImageAsync(h, task.Id, first.SnapshotId));
+
+        // 把最后写入时间往前拨两分钟：等价于"文件写完了，静默期已过"
+        h.WriteSourceFile("just-written.mp4", content, DateTime.UtcNow.AddMinutes(-2));
+
+        BackupRunResult second = await h.BackupAsync(task.Id);
+
+        Assert.Equal(1, second.CreatedFileCount);
+        Assert.Equal(0, second.SkippedFileCount);
+
+        await h.RestoreToAsync(task.Id, second.SnapshotId, "after-settle");
+        byte[] restored = File.ReadAllBytes(
+            Path.Combine(h.RestoreDir, "after-settle", "just-written.mp4"));
+        Assert.Equal(content, restored);
+    }
+
     // ------------------------------------------------------------------
 
     private static string RandomPath(Random random, int index)

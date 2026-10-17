@@ -482,6 +482,9 @@ function typeTagType(type: SnapshotType): 'primary' | 'warning' | 'info' {
               <span v-if="item.snapshot.failedFileCount > 0" class="fbt-warn-count">
                 失败 {{ item.snapshot.failedFileCount }}
               </span>
+              <span v-if="item.snapshot.skippedFileCount > 0" class="fbt-muted">
+                跳过 {{ item.snapshot.skippedFileCount }}
+              </span>
             </div>
           </div>
         </el-scrollbar>

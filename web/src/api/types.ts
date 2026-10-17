@@ -236,6 +236,8 @@ export interface Snapshot {
   deletedFileCount: number
   /** 本次备份中处理失败的文件数（02 新增） */
   failedFileCount: number
+  /** 本次因仍在写入而跳过的文件数。不是失败，下一轮会自动重试 */
+  skippedFileCount: number
   /** 本次实际写入 blob 的字节数（占用空间列） */
   totalBytes: number
   abortReason?: string | null
@@ -922,6 +924,11 @@ export interface AppSettings {
   verifyDeepHashByDefault: boolean
   /** 失败率阈值，超过则告警 */
   failureRateThresholdPercent: number
+  /**
+   * 备份读源文件时是否申请低 IO 优先级（Windows）。
+   * 默认开启：盘空闲时跑满，用户往同一块盘里写东西时自动让路。改完立即生效。
+   */
+  lowPriorityIoEnabled: boolean
 }
 
 /** 保留策略（04 §2.3） */

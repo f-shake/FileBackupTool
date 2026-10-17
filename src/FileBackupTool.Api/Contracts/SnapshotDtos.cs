@@ -28,6 +28,15 @@ public sealed record SnapshotDto
     /// <summary>本次未成功备份的文件数。**必须显眼**——"显示成功但实际不完整"是备份工具最危险的失败模式。</summary>
     public int FailedFileCount { get; init; }
 
+    /// <summary>
+    /// 本次因仍在写入而跳过的文件数。**不是失败**：下一轮会自动重试。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="FailedFileCount"/> 分开显示：失败要排查，跳过只要等。混在一起会让
+    /// "正在拷一个大文件"也报成失败，这个数字很快就没人看了。
+    /// </remarks>
+    public int SkippedFileCount { get; init; }
+
     /// <summary>本次实际写入 blob 的字节数（"占用空间"列）。</summary>
     public long TotalBytes { get; init; }
 

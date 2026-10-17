@@ -128,7 +128,7 @@ public sealed class FakeFileSystem : IFileSystem
         }
     }
 
-    public Stream OpenRead(string fullPath) => throw new NotSupportedException("监控模块不读文件内容。");
+    public Stream OpenRead(string fullPath, bool backgroundIo = false) => throw new NotSupportedException("监控模块不读文件内容。");
 
     public Stream Create(string fullPath) => throw new NotSupportedException("监控模块不写文件内容。");
 

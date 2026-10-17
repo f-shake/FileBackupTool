@@ -1,6 +1,7 @@
 using FileBackupTool.Core.Abstractions;
 using FileBackupTool.Core.Backup;
 using FileBackupTool.Core.Configuration;
+using FileBackupTool.Core.IO;
 using Microsoft.Extensions.Logging;
 
 namespace FileBackupTool.Engine.Blobs;
@@ -51,6 +52,7 @@ public sealed class BlobAcquirer
     private readonly IBlobStore _blobStore;
     private readonly IHashService _hash;
     private readonly JobOptions _options;
+    private readonly IoPrioritySwitch _ioSwitch;
     private readonly ILogger<BlobAcquirer> _logger;
 
     public BlobAcquirer(
@@ -58,26 +60,35 @@ public sealed class BlobAcquirer
         IBlobStore blobStore,
         IHashService hash,
         JobOptions options,
+        IoPrioritySwitch ioSwitch,
         ILoggerFactory loggerFactory)
     {
         _fs = fs;
         _blobStore = blobStore;
         _hash = hash;
         _options = options;
+        _ioSwitch = ioSwitch;
         _logger = loggerFactory.CreateLogger<BlobAcquirer>();
     }
 
     /// <summary>
     /// 取得 blob，失败时按配置重试。
     /// </summary>
-    /// <param name="sourceFullPath">源文件绝对路径。</param>
+    /// <param name="entry">
+    /// 枚举时取到的文件条目的快照。**必须传这个，而不是路径**：拷贝结束后要拿它
+    /// 与源文件的当前状态比对，判断"读到的内容是不是完整的"。
+    /// </param>
     /// <param name="anyRecordWithSameLength">
     /// 是否存在"<c>ContentHash</c> 非空且 <c>Length</c> 等于本文件长度"的记录。
     /// 见 <see cref="DeduplicationPolicy"/>。
     /// </param>
     /// <exception cref="IOException">重试耗尽后仍失败。</exception>
+    /// <exception cref="FileUnstableException">
+    /// 枚举之后文件发生了变化（长度或最后写入时间）。**不重试**：文件还在写，
+    /// 立刻重试只会再读一遍半成品。调用方应按跳过处理，下一次扫描再来。
+    /// </exception>
     public async Task<BlobAcquireResult> AcquireAsync(
-        string sourceFullPath,
+        FileEntry entry,
         bool anyRecordWithSameLength,
         CancellationToken ct)
     {
@@ -89,7 +100,7 @@ public sealed class BlobAcquirer
             ct.ThrowIfCancellationRequested();
             try
             {
-                return await AcquireOnceAsync(sourceFullPath, anyRecordWithSameLength, ct).ConfigureAwait(false);
+                return await AcquireOnceAsync(entry, anyRecordWithSameLength, ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -102,51 +113,97 @@ public sealed class BlobAcquirer
                 double delaySeconds = _options.IoRetryBaseDelaySeconds * Math.Pow(2, attempt);
                 _logger.LogDebug(
                     ex, "读取 {Path} 失败，{Delay:F1}s 后重试（第 {Attempt}/{Total} 次）",
-                    sourceFullPath, delaySeconds, attempt + 1, attempts);
+                    entry.FullPath, delaySeconds, attempt + 1, attempts);
 
                 await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct).ConfigureAwait(false);
             }
         }
 
-        throw last ?? new IOException($"读取 {sourceFullPath} 失败");
+        throw last ?? new IOException($"读取 {entry.FullPath} 失败");
     }
 
     private async Task<BlobAcquireResult> AcquireOnceAsync(
-        string sourceFullPath,
+        FileEntry entry,
         bool anyRecordWithSameLength,
         CancellationToken ct)
     {
+        string sourceFullPath = entry.FullPath;
         BlobWriteStrategy strategy = DeduplicationPolicy.Decide(anyRecordWithSameLength);
 
         if (strategy == BlobWriteStrategy.HashFirstThenMaybeCopy)
         {
             string hash;
-            using (Stream readStream = _fs.OpenRead(sourceFullPath))
+            using (Stream readStream = _fs.OpenRead(sourceFullPath, backgroundIo: WantBackgroundIo))
             {
                 hash = await _hash.ComputeHashAsync(readStream, ct).ConfigureAwait(false);
             }
+
+            // 算完哈希也要复核：这一趟同样可能读到"正在长"的半成品。
+            EnsureUnchanged(entry);
 
             if (_blobStore.Exists(hash))
             {
                 // 命中：0 次写。这正是 Length 预筛要保住的那一半收益——
                 // 否则"边拷边算"会把这一整份文件白写一遍。
+                //
+                // 但命中也不能直接交付：**blob 自己的长度**才是"刚读到的内容有多长"的权威值，
+                // 而它不受目录项滞后影响。长度对不上就说明枚举之后文件变了
+                // （典型形态：被截断成 0 字节，而空 blob 早就存在），
+                // 交付它等于写一条"长度 L、内容为空"的记录，比跳过坏得多。
+                long blobLength = _blobStore.GetLength(hash);
+                if (blobLength != entry.Length)
+                {
+                    throw new FileUnstableException(entry.FullPath,
+                        $"枚举时 {entry.Length} 字节，按当前内容命中的 blob 是 {blobLength} 字节");
+                }
+
                 return new BlobAcquireResult(hash, WroteBytes: false, 0, strategy, SourceReadCount: 1);
             }
         }
 
-        return await CopyWhileHashingAsync(sourceFullPath, strategy, ct).ConfigureAwait(false);
+        return await CopyWhileHashingAsync(entry, strategy, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>开关打开时才申请低 IO 优先级。</summary>
+    private bool WantBackgroundIo => _ioSwitch.Enabled;
+
+    /// <summary>
+    /// 复核"读到的内容是否等于枚举时那一版"。不一致就抛，让本轮跳过。
+    /// </summary>
+    /// <remarks>
+    /// 这是部分写入防护里**唯一真正有效**的一层。宁可变慢一点、多一次 stat，
+    /// 也不能把一个截断的文件固化成合法 blob —— blob 名就是内容哈希，
+    /// 一旦固化，后续所有完整性校验都会替它作证。
+    /// </remarks>
+    private void EnsureUnchanged(FileEntry entry)
+    {
+        FileEntry? current = _fs.GetFile(entry.FullPath);
+        if (current is null)
+        {
+            // 读完就没了：不是"不稳定"，是真的读不到了。按普通 IO 失败处理更能说明问题。
+            throw new IOException($"读取期间文件已消失：{entry.FullPath}");
+        }
+
+        FileEntry now = current.Value;
+        if (now.Length != entry.Length || now.FileTimeUtc != entry.FileTimeUtc)
+        {
+            throw new FileUnstableException(entry.FullPath,
+                $"枚举时 {entry.Length} 字节 / {entry.FileTimeUtc:yyyy-MM-dd HH:mm:ss.fff}，" +
+                $"读取后 {now.Length} 字节 / {now.FileTimeUtc:yyyy-MM-dd HH:mm:ss.fff}");
+        }
     }
 
     private async Task<BlobAcquireResult> CopyWhileHashingAsync(
-        string sourceFullPath,
+        FileEntry entry,
         BlobWriteStrategy strategy,
         CancellationToken ct)
     {
+        string sourceFullPath = entry.FullPath;
         string token = string.Empty;
         Stream? temp = null;
         try
         {
-            using Stream source = _fs.OpenRead(sourceFullPath);
+            using Stream source = _fs.OpenRead(sourceFullPath, backgroundIo: WantBackgroundIo);
             temp = _blobStore.CreateTemporary(out token);
 
             using IIncrementalHasher hasher = _hash.CreateIncremental();
@@ -157,6 +214,18 @@ public sealed class BlobAcquirer
             await temp.FlushAsync(ct).ConfigureAwait(false);
             await temp.DisposeAsync().ConfigureAwait(false);
             temp = null;
+
+            // 最硬的一条：**实际读到的字节数**与枚举时记下的长度不符。
+            // 它不依赖任何元数据，所以 NTFS 目录项滞后也躲不过去 ——
+            // 生产事故里"记录长度 0、blob 却有 4 MB"正是被这一条直接抓住的形态。
+            if (copied != entry.Length)
+            {
+                throw new FileUnstableException(entry.FullPath,
+                    $"枚举时 {entry.Length} 字节，实际读到 {copied} 字节");
+            }
+
+            // 提交前最后一道闸：拷贝期间变过就作废（finally 会 DiscardTemporary）。
+            EnsureUnchanged(entry);
 
             string computed = hasher.Finish();
             BlobPutResult put = _blobStore.CommitTemporary(token, computed);

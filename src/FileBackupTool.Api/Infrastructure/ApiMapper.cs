@@ -29,6 +29,7 @@ public sealed class ApiMapper(IPathNormalizer normalizer)
         ModifiedFileCount = s.ModifiedFileCount,
         DeletedFileCount = s.DeletedFileCount,
         FailedFileCount = s.FailedFileCount,
+        SkippedFileCount = s.SkippedFileCount,
         TotalBytes = s.TotalBytes,
         AbortReason = s.AbortReason,
     };

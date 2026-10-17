@@ -16,6 +16,15 @@ public sealed record AppSettingsDto
 
     /// <summary>失败率阈值（百分比），超过则告警。</summary>
     public double FailureRateThresholdPercent { get; init; } = 10;
+
+    /// <summary>
+    /// 备份读源文件时是否申请低 IO 优先级（Windows 的 <c>IoPriorityHintVeryLow</c>）。
+    /// </summary>
+    /// <remarks>
+    /// 默认开启。它只在**争用**时生效：用户不往同一块盘写东西时，备份照样跑满带宽。
+    /// 关掉它的典型场景是"这台机器上该能力表现异常"，或需要排查吞吐问题时做对照。
+    /// </remarks>
+    public bool LowPriorityIoEnabled { get; init; } = true;
 }
 
 /// <summary>保留策略（04 §2.3）。**默认关闭**。</summary>

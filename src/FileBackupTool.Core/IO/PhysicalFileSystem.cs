@@ -161,9 +161,20 @@ public sealed class PhysicalFileSystem : IFileSystem, IDirectorySkipReporter
         }
     }
 
-    public Stream OpenRead(string fullPath) =>
-        new FileStream(Extend(fullPath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+    public Stream OpenRead(string fullPath, bool backgroundIo = false)
+    {
+        var stream = new FileStream(Extend(fullPath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
             Streams.StreamHelper.DefaultBufferSize, FileOptions.SequentialScan);
+
+        if (backgroundIo)
+        {
+            // 让路是"锦上添花"：非 Windows、文件系统不支持、句柄不允许都会安静地返回 false，
+            // 不影响这次读取（TryApplyBackground 约定永不抛）。
+            IoPriority.TryApplyBackground(stream.SafeFileHandle);
+        }
+
+        return stream;
+    }
 
     public Stream Create(string fullPath)
     {

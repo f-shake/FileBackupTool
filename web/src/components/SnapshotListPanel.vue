@@ -297,6 +297,17 @@ const groupOptions = computed(() =>
           </template>
         </el-table-column>
 
+        <!-- 跳过不是失败：这些文件在备份时仍在被写入，下一次扫描会重试。
+             单独一列，避免和"失败"混为一谈——两者要采取的行动完全不同 -->
+        <el-table-column label="跳过" width="72" align="right">
+          <template #default="{ row }">
+            <span v-if="row.skippedFileCount > 0" class="fbt-warn-count">
+              {{ formatCount(row.skippedFileCount) }}
+            </span>
+            <span v-else class="fbt-muted">0</span>
+          </template>
+        </el-table-column>
+
         <!-- 补齐项 1：占用空间列（旧界面只有文件计数） -->
         <el-table-column label="占用空间" width="110" align="right">
           <template #default="{ row }">
@@ -320,6 +331,9 @@ const groupOptions = computed(() =>
             <span v-if="row.abortReason" class="fbt-danger-count">{{ row.abortReason }}</span>
             <span v-else-if="row.failedFileCount > 0" class="fbt-warn-count">
               成功（{{ formatCount(row.failedFileCount) }} 个文件失败）
+            </span>
+            <span v-else-if="row.skippedFileCount > 0" class="fbt-muted">
+              {{ formatCount(row.skippedFileCount) }} 个文件仍在写入，下次扫描时重试
             </span>
             <span v-else class="fbt-muted">—</span>
           </template>

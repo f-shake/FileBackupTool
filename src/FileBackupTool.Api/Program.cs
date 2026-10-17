@@ -9,6 +9,7 @@ using FileBackupTool.Api.Security;
 using FileBackupTool.Api.Services;
 using FileBackupTool.Core.Abstractions;
 using FileBackupTool.Core.Configuration;
+using FileBackupTool.Core.IO;
 using FileBackupTool.Core.Monitoring;
 using FileBackupTool.Core.Paths;
 using FileBackupTool.Data;
@@ -138,6 +139,9 @@ config.GetSection(HstsApiOptions.SectionName).Bind(hstsOptions);
 
 var retentionOptions = new RetentionOptions();
 config.GetSection(RetentionOptions.SectionName).Bind(retentionOptions);
+
+var jobOptions = new JobOptions();
+config.GetSection(JobOptions.SectionName).Bind(jobOptions);
 
 // -----------------------------------------------------------------------------
 // 3. 服务注册
@@ -451,6 +455,11 @@ builder.Services.AddSignalR();
 // ---- 3.11 引擎 / 数据层 / 监控 ----
 // 顺序说明：AddFileBackupEngine 内部用 TryAdd 注册了一堆默认实现
 //（包括"不发事件"的 IJobEventPublisher），所以它必须在**被覆盖的注册之前**调用。
+
+// 低 IO 优先级开关：先用配置里的值做出厂默认；启动后由 SettingsService 用数据库里的值覆盖
+//（数据库是事实来源，配置只负责首次播种 —— 与保留策略同一套约定）。
+builder.Services.AddSingleton(new IoPrioritySwitch(jobOptions.LowPriorityIo));
+
 builder.Services.AddFileBackupEngine();
 
 // 作业事件 → SignalR。先替换掉引擎的 NullJobEventPublisher，
@@ -655,7 +664,7 @@ try
     }
 
     SettingsService settings = services.GetRequiredService<SettingsService>();
-    await settings.SeedFromConfigurationAsync(securityOptions, retentionOptions, CancellationToken.None);
+    await settings.SeedFromConfigurationAsync(securityOptions, retentionOptions, jobOptions, CancellationToken.None);
 
     // 初始账号：密码只能来自环境变量。环境变量缺失时 IdentitySeeder 抛异常，
     // 我们把它变成"拒绝启动 + 一段怎么配的说明"，**绝不**自己生成密码并打印到日志
